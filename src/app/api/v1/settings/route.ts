@@ -125,6 +125,65 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, integration });
     }
 
+    // Action 3: Delete TikTok Destination
+    if (action === 'delete_destination') {
+      const destinationId = body.id || body.destinationId;
+      if (!destinationId) {
+        return NextResponse.json({ error: 'Destination ID is required' }, { status: 400 });
+      }
+      const deleted = db.deleteDestination(destinationId, workspaceId);
+      return NextResponse.json({ success: deleted });
+    }
+
+    // Action 4: Delete Affiliate Integration
+    if (action === 'delete_integration') {
+      const integrationId = body.id || body.integrationId;
+      if (!integrationId) {
+        return NextResponse.json({ error: 'Integration ID is required' }, { status: 400 });
+      }
+      const deleted = db.deleteIntegration(integrationId, workspaceId);
+      return NextResponse.json({ success: deleted });
+    }
+
+    // Action 5: Add New Custom Integration Channel
+    if (action === 'add_integration') {
+      const network = body.network;
+      const name = body.name?.trim() || `${network.toUpperCase()} S2S Channel`;
+      const secretToken = body.secretToken?.trim() || `${network.substring(0, 2)}_live_sec_${Math.floor(100000 + Math.random() * 900000)}`;
+      const destinationId = body.destinationId || undefined;
+      const eventName = body.eventName || 'CompletePayment';
+      const valueStrategy = body.valueStrategy || 'commission';
+
+      const newIntegration = {
+        id: `int-${network}-${Date.now().toString(36)}`,
+        workspaceId,
+        network,
+        name,
+        secretToken,
+        destinationId,
+        eventName,
+        valueStrategy,
+        status: 'connected' as const,
+        createdAt: new Date().toISOString(),
+      };
+
+      db.saveIntegration(newIntegration);
+      return NextResponse.json({ success: true, integration: newIntegration });
+    }
+
+    // Action 6: Regenerate Secret Token
+    if (action === 'regenerate_token') {
+      const integrationId = body.integrationId;
+      const integration = db.getIntegrationById(integrationId, workspaceId);
+      if (!integration) {
+        return NextResponse.json({ error: 'Integration channel not found' }, { status: 404 });
+      }
+      const newToken = `${integration.network.substring(0, 2)}_live_sec_${Math.floor(100000 + Math.random() * 900000)}`;
+      integration.secretToken = newToken;
+      db.saveIntegration(integration);
+      return NextResponse.json({ success: true, secretToken: newToken });
+    }
+
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });

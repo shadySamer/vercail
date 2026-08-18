@@ -207,8 +207,66 @@ class RelationalDatabaseStore {
         CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_jobs(status, next_retry_at);
         CREATE INDEX IF NOT EXISTS idx_raw_events_workspace ON raw_inbound_events(workspace_id);
       `);
+
+      this.seedDefaults();
     } catch (err) {
       console.error('Schema initialization error:', err);
+    }
+  }
+
+  private seedDefaults() {
+    try {
+      const wsCount = this.db.prepare('SELECT count(*) as c FROM workspaces').get() as any;
+      if (!wsCount || wsCount.c === 0) {
+        this.saveWorkspace({
+          id: 'ws-master-01',
+          name: 'Production Workspace',
+          slug: 'production',
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      const intCount = this.db.prepare('SELECT count(*) as c FROM affiliate_integrations').get() as any;
+      if (!intCount || intCount.c === 0) {
+        const defaultNetworks: Array<{ network: NetworkType; name: string; token: string }> = [
+          { network: 'maxweb', name: 'MaxWeb S2S Channel', token: 'mw_live_sec_884920' },
+          { network: 'buygoods', name: 'BuyGoods S2S Channel', token: 'bg_live_sec_119284' },
+          { network: 'digistore24', name: 'Digistore24 S2S Channel', token: 'ds_live_sec_994821' },
+          { network: 'clickbank', name: 'ClickBank S2S Channel', token: 'cb_live_sec_772910' },
+        ];
+
+        for (const n of defaultNetworks) {
+          const id = `int-${n.network}-01`;
+          this.saveIntegration({
+            id,
+            workspaceId: 'ws-master-01',
+            network: n.network,
+            name: n.name,
+            secretToken: n.token,
+            valueStrategy: 'commission',
+            status: 'connected',
+            createdAt: new Date().toISOString(),
+          });
+
+          this.updateIntegrationHealth({
+            id: `health-${n.network}-01`,
+            workspaceId: 'ws-master-01',
+            integrationId: id,
+            network: n.network,
+            status: 'healthy',
+            totalPostbacksReceived: 0,
+            totalConversionsProcessed: 0,
+            missingClickIdCount: 0,
+            duplicateCount: 0,
+            failedDeliveriesCount: 0,
+            attributionRate: 100,
+            deliveryRate: 100,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('Seed defaults notice:', err);
     }
   }
 
@@ -305,6 +363,18 @@ class RelationalDatabaseStore {
     );
   }
 
+  public deleteDestination(id: string, workspaceId?: string): boolean {
+    try {
+      const stmt = workspaceId
+        ? this.db.prepare('DELETE FROM tiktok_destinations WHERE id = ? AND workspace_id = ?')
+        : this.db.prepare('DELETE FROM tiktok_destinations WHERE id = ?');
+      const info = workspaceId ? stmt.run(id, workspaceId) : stmt.run(id);
+      return info.changes > 0;
+    } catch {
+      return false;
+    }
+  }
+
   // Affiliate Integrations
   public getIntegrations(workspaceId?: string): AffiliateIntegration[] {
     try {
@@ -352,6 +422,43 @@ class RelationalDatabaseStore {
       };
     } catch {
       return undefined;
+    }
+  }
+
+  public getIntegrationById(id: string, workspaceId?: string): AffiliateIntegration | undefined {
+    try {
+      let stmt = workspaceId
+        ? this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ? AND workspace_id = ?')
+        : this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ?');
+      const r = (workspaceId ? stmt.get(id, workspaceId) : stmt.get(id)) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        workspaceId: r.workspace_id,
+        network: r.network as NetworkType,
+        name: r.name,
+        secretToken: r.secret_token,
+        webhookSecretEncrypted: r.webhook_secret_encrypted || undefined,
+        destinationId: r.destination_id || undefined,
+        eventName: r.event_name || undefined,
+        valueStrategy: (r.value_strategy || 'commission') as any,
+        status: r.status,
+        createdAt: r.created_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public deleteIntegration(id: string, workspaceId?: string): boolean {
+    try {
+      const stmt = workspaceId
+        ? this.db.prepare('DELETE FROM affiliate_integrations WHERE id = ? AND workspace_id = ?')
+        : this.db.prepare('DELETE FROM affiliate_integrations WHERE id = ?');
+      const info = workspaceId ? stmt.run(id, workspaceId) : stmt.run(id);
+      return info.changes > 0;
+    } catch {
+      return false;
     }
   }
 
