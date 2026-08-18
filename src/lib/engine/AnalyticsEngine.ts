@@ -65,7 +65,7 @@ export class AnalyticsEngine {
     // Initialize map for all configured accounts
     for (const net of networkAccounts) {
       netStats[net.network] = {
-        accountName: net.accountName,
+        accountName: net.name || net.accountName || net.network.toUpperCase(),
         total: 0,
         initialSales: 0,
         upsells: 0,

@@ -280,7 +280,7 @@ export default function ConversionsPage() {
                       {detail.deliveryAttempts.map(attempt => (
                         <div key={attempt.id} className="p-3 bg-[#0d1322] border border-slate-800 rounded-lg text-xs space-y-2 font-mono">
                           <div className="flex items-center justify-between text-slate-300">
-                            <span>Status: HTTP {attempt.responseStatusCode}</span>
+                            <span>Status: HTTP {attempt.statusCode}</span>
                             <span className="text-emerald-400 font-bold">Latency: {attempt.latencyMs}ms</span>
                           </div>
                           <div className="bg-black/40 p-2.5 rounded border border-slate-900 overflow-x-auto text-[11px] text-slate-300">

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db/store';
 import { DEFAULT_WORKSPACE_ID } from '@/lib/db/seed';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const workspaceId = url.searchParams.get('workspaceId') || DEFAULT_WORKSPACE_ID;

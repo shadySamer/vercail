@@ -30,6 +30,8 @@ export type OutboxStatus =
 
 export type NetworkType = 'maxweb' | 'buygoods' | 'digistore24' | 'clickbank';
 
+export type AdPlatformType = 'tiktok' | 'meta' | 'google';
+
 export type ValueStrategy = 'commission' | 'gross' | 'none';
 
 export type IntegrationHealthStatus = 'healthy' | 'warning' | 'broken' | 'disconnected';
@@ -212,4 +214,21 @@ export interface NormalizedNetworkResult {
   customerUserAgent?: string;
   customerEmail?: string;
   rawDetails?: Record<string, any>;
+}
+
+export interface VerificationCapabilityMatrix {
+  network: NetworkType;
+  directLinking: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  clickIdPersistence: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  s2sPostback: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  purchaseEvent: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  upsellEvent: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  rebillEvent: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  refundEvent: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  chargebackEvent: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  commissionPayout: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  grossRevenue: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  signedSecurity: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  testSimulation: 'VERIFIED' | 'UNSUPPORTED' | 'UNKNOWN';
+  notes: string;
 }

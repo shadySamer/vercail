@@ -3,6 +3,8 @@ import { db } from '@/lib/db/store';
 import { networkRegistry } from '@/lib/adapters/network/NetworkRegistry';
 import { DEFAULT_WORKSPACE_ID } from '@/lib/db/seed';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const workspaceId = url.searchParams.get('workspaceId') || DEFAULT_WORKSPACE_ID;

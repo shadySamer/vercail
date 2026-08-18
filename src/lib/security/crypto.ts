@@ -79,13 +79,8 @@ export function verifyDigistore24Signature(passphrase: string, params: Record<st
   }
 }
 
-/**
- * SHA-256 Hash for TikTok Match Keys (e.g. email, phone)
- * Lowercase, trimmed before hashing per TikTok guidelines
- */
-export function hashSha256(value?: string): string | undefined {
-  if (!value) return undefined;
-  const clean = value.trim().toLowerCase();
+export function hashSha256(value: string): string {
+  const clean = (value || '').trim().toLowerCase();
   return crypto.createHash('sha256').update(clean).digest('hex');
 }
 
