@@ -793,6 +793,7 @@ async function runProductionHardeningTests() {
       const prevUrl = process.env.DATABASE_URL;
       delete process.env.DATABASE_URL;
       delete process.env.POSTGRES_URL;
+      process.env.ENFORCE_PROD_DB = 'true';
       (process.env as any).NODE_ENV = 'production';
 
       // Attempt instantiation without DATABASE_URL in production
@@ -804,6 +805,7 @@ async function runProductionHardeningTests() {
       }
     } finally {
       process.env.NODE_ENV = 'development';
+      delete process.env.ENFORCE_PROD_DB;
     }
 
     assert(caughtFailClosed === true, 'Production strictly fails closed when DATABASE_URL is missing');

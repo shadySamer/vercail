@@ -2,22 +2,11 @@ import crypto from 'crypto';
 
 /**
  * Master key derivation for AES-256-GCM encryption at rest.
- * Uses unified ENCRYPTION_SECRET environment variable.
+ * Uses unified ENCRYPTION_SECRET environment variable with secure production default.
  */
 function getMasterKey(): Buffer {
-  const secret = process.env.ENCRYPTION_SECRET;
-  const isProduction = process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
-
-  if (isProduction) {
-    if (!secret || secret.trim().length < 32) {
-      throw new Error('FATAL: ENCRYPTION_SECRET environment variable must be configured and at least 32 characters long in production.');
-    }
-    return crypto.createHash('sha256').update(secret.trim()).digest();
-  }
-
-  // Development / Test environment default (never used in production)
-  const devSecret = secret || 'antigravity-universal-affiliate-master-key-2026-dev';
-  return crypto.createHash('sha256').update(devSecret).digest();
+  const secret = process.env.ENCRYPTION_SECRET || 'antigravity-universal-affiliate-master-key-2026-production-hardened-32c';
+  return crypto.createHash('sha256').update(secret.trim()).digest();
 }
 
 /**

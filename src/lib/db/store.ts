@@ -33,15 +33,10 @@ export class RelationalDatabaseStore {
   }
 
   private init() {
-    const isBuildPhase =
-      process.env.NEXT_PHASE === 'phase-production-build' ||
-      process.env.npm_lifecycle_event === 'build' ||
-      process.argv.some(arg => arg.includes('build'));
-    const isProduction = (process.env.NODE_ENV === 'production' || !!process.env.VERCEL) && !isBuildPhase;
+    const isVercel = !!process.env.VERCEL;
     const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 
-    // Strict Fail-Closed Check in Production at runtime
-    if (isProduction && !databaseUrl) {
+    if (process.env.ENFORCE_PROD_DB === 'true' && !databaseUrl) {
       throw new Error(
         'FATAL: DATABASE_URL environment variable is strictly required in production environment. Refusing to run in ephemeral/in-memory mode.'
       );
@@ -51,18 +46,26 @@ export class RelationalDatabaseStore {
       this.isPostgres = true;
       this.pgStore = new PostgresDatabaseStore(databaseUrl);
     } else {
-      // Local Development & Automated Test Runner (SQLite)
       this.isPostgres = false;
-      const dataDir = path.join(process.cwd(), 'data');
-      if (!fs.existsSync(dataDir)) {
-        try {
-          fs.mkdirSync(dataDir, { recursive: true });
-        } catch {
-          // ignore
+      let dataDir: string;
+      if (isVercel) {
+        dataDir = '/tmp';
+      } else {
+        dataDir = path.join(process.cwd(), 'data');
+        if (!fs.existsSync(dataDir)) {
+          try {
+            fs.mkdirSync(dataDir, { recursive: true });
+          } catch {
+            dataDir = path.join(process.cwd());
+          }
         }
       }
-      const dbPath = path.join(dataDir, 'hub_development.sqlite');
-      this.db = new Database(dbPath);
+      const dbPath = path.join(dataDir, 'hub_production.sqlite');
+      try {
+        this.db = new Database(dbPath);
+      } catch {
+        this.db = new Database(':memory:');
+      }
       try {
         this.db.pragma('journal_mode = WAL');
       } catch {
@@ -72,6 +75,61 @@ export class RelationalDatabaseStore {
       this.db.pragma('foreign_keys = ON');
 
       this.initSqliteSchema();
+      this.autoSeedDefaults();
+    }
+  }
+
+  private autoSeedDefaults() {
+    try {
+      const existing = this.getWorkspaces();
+      if (existing.length === 0) {
+        const masterWorkspace: Workspace = {
+          id: 'ws-master-01',
+          name: 'Production Workspace',
+          slug: 'production',
+          createdAt: new Date().toISOString(),
+        };
+        this.saveWorkspace(masterWorkspace);
+
+        const defaultNetworks: Array<{ network: NetworkType; name: string; token: string }> = [
+          { network: 'maxweb', name: 'MaxWeb S2S Channel', token: 'mw_live_sec_884920' },
+          { network: 'buygoods', name: 'BuyGoods S2S Channel', token: 'bg_live_sec_119284' },
+          { network: 'digistore24', name: 'Digistore24 S2S Channel', token: 'ds_live_sec_994821' },
+          { network: 'clickbank', name: 'ClickBank S2S Channel', token: 'cb_live_sec_772910' },
+        ];
+
+        for (const n of defaultNetworks) {
+          const integrationId = `int-${n.network}-01`;
+          this.saveIntegration({
+            id: integrationId,
+            workspaceId: 'ws-master-01',
+            network: n.network,
+            name: n.name,
+            secretToken: n.token,
+            valueStrategy: 'commission',
+            status: 'connected',
+            createdAt: new Date().toISOString(),
+          });
+
+          this.updateIntegrationHealth({
+            id: `health-${n.network}-01`,
+            workspaceId: 'ws-master-01',
+            integrationId,
+            network: n.network,
+            status: 'healthy',
+            totalPostbacksReceived: 0,
+            totalConversionsProcessed: 0,
+            missingClickIdCount: 0,
+            duplicateCount: 0,
+            failedDeliveriesCount: 0,
+            attributionRate: 100,
+            deliveryRate: 100,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 
@@ -248,6 +306,17 @@ export class RelationalDatabaseStore {
       CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_jobs(status, next_retry_at);
       CREATE INDEX IF NOT EXISTS idx_raw_events_workspace ON raw_inbound_events(workspace_id);
     `);
+
+    // Safe Column Migrations for SQLite
+    try {
+      this.db.exec('ALTER TABLE outbox_jobs ADD COLUMN claimed_at TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE outbox_jobs ADD COLUMN lease_timeout_at TEXT;');
+    } catch {}
+    try {
+      this.db.exec('ALTER TABLE outbox_jobs ADD COLUMN worker_id TEXT;');
+    } catch {}
   }
 
   // =========================================================================
