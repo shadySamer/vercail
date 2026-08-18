@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 
 export default function SimulatorPage() {
@@ -13,6 +13,40 @@ export default function SimulatorPage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [burstStatus, setBurstStatus] = useState<string | null>(null);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedCurl, setCopiedCurl] = useState(false);
+  const [host, setHost] = useState('');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setHost(window.location.host);
+    }
+  }, []);
+
+  const getTestUrl = () => {
+    const currentHost = host || 'your-domain.vercel.app';
+    if (network === 'maxweb') {
+      return `https://${currentHost}/api/v1/postbacks/maxweb/ws-master-01/mw_live_sec_884920?orderid=${orderId}&subid5=${encodeURIComponent(clickId)}&amount=${amount}&currency=USD`;
+    }
+    if (network === 'buygoods') {
+      return `https://${currentHost}/api/v1/postbacks/buygoods/ws-master-01/bg_live_sec_119284?orderid=${orderId}&subid=${encodeURIComponent(clickId)}&amount=${amount}&currency=USD`;
+    }
+    if (network === 'digistore24') {
+      return `https://${currentHost}/api/v1/postbacks/digistore24/ws-master-01/ds_live_sec_994821?transaction_id=${orderId}&cid=${encodeURIComponent(clickId)}&amount_affiliate=${amount}&currency=USD`;
+    }
+    return `https://${currentHost}/api/v1/postbacks/clickbank/ws-master-01/cb_live_sec_772910?receipt=${orderId}&extclid=${encodeURIComponent(clickId)}&amount=${amount}&currency=USD`;
+  };
+
+  const copyToClipboard = (text: string, type: 'url' | 'curl') => {
+    navigator.clipboard.writeText(text);
+    if (type === 'url') {
+      setCopiedUrl(true);
+      setTimeout(() => setCopiedUrl(false), 2000);
+    } else {
+      setCopiedCurl(true);
+      setTimeout(() => setCopiedCurl(false), 2000);
+    }
+  };
 
   const handleSimulate = async (customParams: any = {}) => {
     setLoading(true);
@@ -70,7 +104,7 @@ export default function SimulatorPage() {
       );
 
       const results = await Promise.all(promises);
-      setBurstStatus(`Executed 10 postbacks: 1 created canonical conversion, 9 suppressed as duplicate without duplicate TikTok dispatch.`);
+      setBurstStatus('Executed 10 postbacks: 1 created canonical conversion, 9 suppressed as duplicate without duplicate TikTok dispatch.');
       setResult({ burstResults: results });
     } catch (err: any) {
       setBurstStatus(`Burst failed: ${err.message}`);
@@ -84,25 +118,62 @@ export default function SimulatorPage() {
       {/* Top Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800/80 pb-5">
         <div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">End-to-End Simulation Lab</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-white tracking-tight">End-to-End Simulation & Verification Lab</h1>
+            <span className="badge badge-success text-[10px]">LIVE PRODUCTION RADAR</span>
+          </div>
           <p className="text-sm text-slate-400 mt-1">
-            Simulate live postback traffic, duplicate bursts, missing Click IDs, upsells, and refund reconciliations
+            Test inbound S2S postbacks from any network, verify ttclid extraction, and inspect live TikTok Events API delivery
           </p>
         </div>
 
-        <Link
-          href="/conversions"
-          className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 self-start md:self-auto"
-        >
-          Open Conversions Debugger &rarr;
-        </Link>
+        <div className="flex items-center gap-3">
+          <Link
+            href="/conversions"
+            className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-lg shadow-blue-600/20"
+          >
+            Conversions Debugger &rarr;
+          </Link>
+        </div>
+      </div>
+
+      {/* Production Live Postback URL Generator Bar */}
+      <div className="bg-[#111827] border border-blue-500/30 rounded-xl p-4 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-bold text-white">
+            <span className="text-blue-400">🔗</span>
+            <span>Live Production Postback Test URL for {network.toUpperCase()}:</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => copyToClipboard(getTestUrl(), 'url')}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5"
+            >
+              <span>📋</span> {copiedUrl ? 'Copied URL!' : 'Copy Test URL'}
+            </button>
+            <button
+              onClick={() => copyToClipboard(`curl -i "${getTestUrl()}"`, 'curl')}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-all flex items-center gap-1.5"
+            >
+              <span>💻</span> {copiedCurl ? 'Copied cURL!' : 'Copy cURL Command'}
+            </button>
+          </div>
+        </div>
+
+        <div className="p-2.5 rounded-lg bg-[#0a0f1d] border border-slate-800 text-[11px] font-mono text-emerald-400 break-all select-all">
+          {getTestUrl()}
+        </div>
+        <p className="text-[11px] text-slate-400">
+          💡 You can paste this URL directly into your browser, run it via terminal / Postman, or paste it in your affiliate network postback tester.
+        </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Simulator Controls */}
         <div className="lg:col-span-6 bg-[#111827] border border-slate-800/80 rounded-xl p-5 shadow-sm space-y-4">
-          <h2 className="text-base font-bold text-white border-b border-slate-800/80 pb-3">
-            Simulate Conversion Ingestion
+          <h2 className="text-base font-bold text-white border-b border-slate-800/80 pb-3 flex items-center justify-between">
+            <span>Simulate Conversion Ingestion</span>
+            <span className="text-xs text-blue-400 font-mono">1-Click Dispatch</span>
           </h2>
 
           <div className="space-y-4 text-xs">
@@ -115,10 +186,10 @@ export default function SimulatorPage() {
                 onChange={e => setNetwork(e.target.value)}
                 className="w-full bg-[#0d1322] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               >
-                <option value="maxweb">MaxWeb (subid, subid2-5, order_id, amount)</option>
-                <option value="buygoods">BuyGoods (subid, subid2-3, order_id, amount)</option>
-                <option value="digistore24">Digistore24 (cid, order_id, custom, sha512)</option>
-                <option value="clickbank">ClickBank (extclid, campaign, lineItems, INS)</option>
+                <option value="maxweb">MaxWeb (subid, subid5, order_id, amount)</option>
+                <option value="buygoods">BuyGoods (subid, order_id, amount)</option>
+                <option value="digistore24">Digistore24 (cid, order_id, amount_affiliate)</option>
+                <option value="clickbank">ClickBank (extclid, receipt, amount)</option>
               </select>
             </div>
 
@@ -236,8 +307,9 @@ export default function SimulatorPage() {
 
         {/* Live Simulation Response Inspector */}
         <div className="lg:col-span-6 bg-[#111827] border border-slate-800/80 rounded-xl p-5 shadow-sm space-y-4">
-          <h2 className="text-base font-bold text-white border-b border-slate-800/80 pb-3">
-            Real-time Ingestion Result
+          <h2 className="text-base font-bold text-white border-b border-slate-800/80 pb-3 flex items-center justify-between">
+            <span>Real-time Ingestion Result</span>
+            {result?.success && <span className="badge badge-success text-[10px]">TikTok Dispatched</span>}
           </h2>
 
           {burstStatus && (
@@ -268,7 +340,7 @@ export default function SimulatorPage() {
             </div>
           ) : (
             <div className="p-12 text-center text-slate-400 text-xs border border-dashed border-slate-800 rounded-lg">
-              Click &quot;Ingest Test Conversion&quot; or &quot;10x Duplicate Burst Test&quot; to inspect the live HTTP postback response, idempotency check, and TikTok Events API dispatch.
+              Click &quot;Ingest Test Conversion&quot; or copy the Live Test URL above to inspect the live HTTP postback response, idempotency check, and TikTok Events API dispatch.
             </div>
           )}
         </div>

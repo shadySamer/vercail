@@ -7,6 +7,8 @@ export const metadata: Metadata = {
   description: 'Server-to-Server Affiliate Conversion Hub for TikTok Ads',
 };
 
+import LivePostbackNotifier from '@/components/LivePostbackNotifier';
+
 export default function RootLayout({
   children,
 }: {
@@ -15,6 +17,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="min-h-screen flex flex-col md:flex-row bg-[#090d16] text-slate-100 antialiased selection:bg-blue-600 selection:text-white">
+        <LivePostbackNotifier />
         {/* Navigation Sidebar */}
         <aside className="w-full md:w-64 bg-[#0d1322] border-b md:border-b-0 md:border-r border-slate-800/80 flex flex-col shrink-0">
           {/* Brand Header */}
