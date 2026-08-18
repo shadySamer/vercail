@@ -43,7 +43,8 @@ export class AttributionEngine {
     const targetEventName = integration.eventName || destination.defaultEventName || 'CompletePayment';
 
     // 3. Check Deterministic TikTok Click ID (ttclid) Evidence
-    if (!normalized.clickId || normalized.clickId.trim() === '') {
+    const clickId = normalized.clickIdClean || (normalized as any).clickId;
+    if (!clickId || clickId.trim() === '') {
       return {
         status: 'unattributed',
         resolvedDestination: destination,

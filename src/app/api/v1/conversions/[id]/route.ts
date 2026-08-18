@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db/store';
+import { getAuthenticatedWorkspace } from '@/lib/security/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,19 +10,24 @@ interface RouteParams {
   };
 }
 
-export async function GET(_request: NextRequest, { params }: RouteParams) {
+export async function GET(request: NextRequest, { params }: RouteParams) {
+  const auth = getAuthenticatedWorkspace(request);
+  if (!auth) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
   const conversionId = params.id;
   const conversion = db.getConversionById(conversionId);
 
-  if (!conversion) {
+  if (!conversion || conversion.workspaceId !== auth.workspaceId) {
     return NextResponse.json({ error: 'Conversion not found' }, { status: 404 });
   }
 
   const rawEvent = db.getRawEventById(conversion.rawEventId);
   const outboxTasks = db.getOutboxTasks().filter(t => t.conversionId === conversionId);
   const deliveryAttempts = db.getDeliveryAttemptsForConversion(conversionId);
-  const pixel = conversion.resolvedPixelId ? db.getPixelById(conversion.resolvedPixelId, conversion.workspaceId) : undefined;
-  const networkAccount = db.getNetworkAccounts(conversion.workspaceId).find(n => n.id === conversion.networkAccountId);
+  const destination = conversion.destinationId ? db.getDestinationById(conversion.destinationId, conversion.workspaceId) : undefined;
+  const integration = db.getIntegrations(conversion.workspaceId).find(n => n.id === conversion.integrationId);
 
   // Human-readable Journey Diagnostics
   const journey = [
@@ -38,7 +44,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       title: 'Authentication & Signature Verification',
       status: 'completed',
       timestamp: conversion.receivedAt,
-      details: `Verified token & cryptographic signature for channel "${networkAccount?.name || conversion.network}"`,
+      details: `Verified token & cryptographic signature for channel "${integration?.name || conversion.network}"`,
       isSuccess: rawEvent?.verificationStatus === 'verified',
     },
     {
@@ -55,7 +61,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       status: conversion.status === 'unattributed' ? 'warning' : 'completed',
       timestamp: conversion.receivedAt,
       details: conversion.clickId
-        ? `Found valid TikTok Click ID (${conversion.clickId.substring(0, 20)}...) -> Mapped to Pixel ${conversion.resolvedPixelId || 'Default'}`
+        ? `Found valid TikTok Click ID (${conversion.clickId.substring(0, 20)}...) -> Mapped to Destination ${destination?.name || 'Assigned Destination'}`
         : 'Missing or unreplaced TikTok Click ID (__CLICKID__). Financial record preserved but skipped TikTok dispatch.',
       isSuccess: conversion.status !== 'unattributed',
     },
@@ -73,7 +79,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
         : 'in_progress',
       timestamp: conversion.processedAt || conversion.receivedAt,
       details: conversion.status === 'accepted'
-        ? `Event "${conversion.targetEventName || 'CompletePayment'}" accepted by TikTok Events API (${deliveryAttempts[0]?.latencyMs || 45}ms latency)`
+        ? `Event "${conversion.tiktokEventName || 'CompletePayment'}" accepted by TikTok Events API (${deliveryAttempts[0]?.latencyMs || 45}ms latency)`
         : conversion.errorMessage || 'Queued for delivery attempt',
       isSuccess: conversion.status === 'accepted',
     },
@@ -84,8 +90,13 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     rawEvent,
     outboxTasks,
     deliveryAttempts,
-    pixel,
-    networkAccount,
+    destination: destination ? {
+      id: destination.id,
+      name: destination.name,
+      pixelId: destination.pixelId,
+      defaultEventName: destination.defaultEventName,
+    } : undefined,
+    integration,
     journey,
   });
 }

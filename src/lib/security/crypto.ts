@@ -1,16 +1,33 @@
 import crypto from 'crypto';
 
-// Master key derivation for encryption at rest (defaults to 32-byte key derived from env or static fallback for dev)
-const ENCRYPTION_SECRET = process.env.MASTER_ENCRYPTION_KEY || 'antigravity-universal-affiliate-master-key-2026';
-const MASTER_KEY = crypto.createHash('sha256').update(ENCRYPTION_SECRET).digest();
+/**
+ * Master key derivation for AES-256-GCM encryption at rest.
+ * Uses unified ENCRYPTION_SECRET environment variable.
+ */
+function getMasterKey(): Buffer {
+  const secret = process.env.ENCRYPTION_SECRET;
+  const isProduction = process.env.NODE_ENV === 'production' || !!process.env.VERCEL;
+
+  if (isProduction) {
+    if (!secret || secret.trim().length < 32) {
+      throw new Error('FATAL: ENCRYPTION_SECRET environment variable must be configured and at least 32 characters long in production.');
+    }
+    return crypto.createHash('sha256').update(secret.trim()).digest();
+  }
+
+  // Development / Test environment default (never used in production)
+  const devSecret = secret || 'antigravity-universal-affiliate-master-key-2026-dev';
+  return crypto.createHash('sha256').update(devSecret).digest();
+}
 
 /**
  * Encrypt sensitive tokens at rest using AES-256-GCM
  */
 export function encryptSecret(plainText: string): string {
   if (!plainText) return '';
+  const masterKey = getMasterKey();
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', MASTER_KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
   let encrypted = cipher.update(plainText, 'utf8', 'hex');
   encrypted += cipher.final('hex');
   const authTag = cipher.getAuthTag().toString('hex');
@@ -24,12 +41,13 @@ export function decryptSecret(encryptedPayload: string): string {
   if (!encryptedPayload) return '';
   try {
     const parts = encryptedPayload.split(':');
-    if (parts.length !== 3) return encryptedPayload; // Fallback if plain
+    if (parts.length !== 3) return encryptedPayload; // Plaintext fallback during migration
+    const masterKey = getMasterKey();
     const iv = Buffer.from(parts[0], 'hex');
     const authTag = Buffer.from(parts[1], 'hex');
     const cipherText = parts[2];
 
-    const decipher = crypto.createDecipheriv('aes-256-gcm', MASTER_KEY, iv);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, iv);
     decipher.setAuthTag(authTag);
     let decrypted = decipher.update(cipherText, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
@@ -38,6 +56,18 @@ export function decryptSecret(encryptedPayload: string): string {
     console.error('Decryption failed:', err);
     return '';
   }
+}
+
+/**
+ * Generate cryptographically secure random token (CSPRNG)
+ * Format: prefix_randomHex48 (e.g. mw_live_sec_a3f89...)
+ */
+export function generateSecureToken(prefix?: string): string {
+  const randomHex = crypto.randomBytes(24).toString('hex');
+  if (prefix) {
+    return `${prefix.toLowerCase()}_live_sec_${randomHex}`;
+  }
+  return `sec_${randomHex}`;
 }
 
 /**
@@ -79,6 +109,9 @@ export function verifyDigistore24Signature(passphrase: string, params: Record<st
   }
 }
 
+/**
+ * Deterministic SHA-256 Hash for TikTok Match Keys and Idempotency Keys
+ */
 export function hashSha256(value: string): string {
   const clean = (value || '').trim().toLowerCase();
   return crypto.createHash('sha256').update(clean).digest('hex');
@@ -89,6 +122,31 @@ export function hashSha256(value: string): string {
  */
 export function maskSecret(secret?: string): string {
   if (!secret) return '••••••••';
-  if (secret.length <= 6) return '••••••';
-  return `${secret.substring(0, 3)}••••••••${secret.substring(secret.length - 3)}`;
+  if (secret.length <= 8) return '••••••••';
+  return `${secret.substring(0, 4)}••••••••${secret.substring(secret.length - 4)}`;
+}
+
+/**
+ * Sanitize raw inbound payload and headers before logging to eliminate credential leakage
+ */
+export function sanitizeInboundPayload(data: any): any {
+  if (!data || typeof data !== 'object') return data;
+  const sensitiveKeys = ['token', 'secret', 'password', 'authorization', 'access_token', 'encryption_secret', 'key'];
+  
+  if (Array.isArray(data)) {
+    return data.map(item => sanitizeInboundPayload(item));
+  }
+
+  const sanitized: Record<string, any> = {};
+  for (const [k, v] of Object.entries(data)) {
+    const lowerKey = k.toLowerCase();
+    if (sensitiveKeys.some(s => lowerKey.includes(s))) {
+      sanitized[k] = typeof v === 'string' ? maskSecret(v) : '[REDACTED]';
+    } else if (v && typeof v === 'object') {
+      sanitized[k] = sanitizeInboundPayload(v);
+    } else {
+      sanitized[k] = v;
+    }
+  }
+  return sanitized;
 }

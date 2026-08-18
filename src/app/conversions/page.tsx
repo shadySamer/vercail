@@ -165,13 +165,15 @@ export default function ConversionsPage() {
                       </div>
                     </td>
                     <td className="py-3.5 px-4 text-right font-mono font-bold text-emerald-400">
-                      ${c.commissionAmount.toFixed(2)}
+                      {c.commissionAmount !== null && c.commissionAmount !== undefined
+                        ? `$${c.commissionAmount.toFixed(2)}`
+                        : '—'}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-[11px] max-w-[150px] truncate text-slate-400">
                       {c.clickId || <span className="text-amber-400/80 italic">Missing ttclid</span>}
                     </td>
                     <td className="py-3.5 px-4 font-mono text-blue-300">
-                      {c.campaignId || 'Direct'}
+                      Direct Linking
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <span className={`badge ${

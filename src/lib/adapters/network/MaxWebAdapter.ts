@@ -20,8 +20,9 @@ export class MaxWebAdapter implements AffiliateNetworkAdapter {
         verificationError: 'Missing mandatory Order ID in MaxWeb postback payload',
         transactionId: '',
         eventType: 'unknown',
-        currency: 'USD',
-        commissionAmount: 0,
+        currency: null,
+        amountCommission: null,
+        amountGross: null,
       };
     }
     const transactionId = rawTxId.trim();
@@ -39,18 +40,18 @@ export class MaxWebAdapter implements AffiliateNetworkAdapter {
       params.click_id ||
       undefined;
 
-    const clickId = extractCleanTtclid(rawClickId);
+    const clickIdClean = extractCleanTtclid(rawClickId);
 
-    // Commission payout from COMMISSION_AMOUNT
-    const commissionRaw = params.amount || params.commission || params.COMMISSION_AMOUNT || params.payout || '0';
-    const commissionAmount = parseFloat(commissionRaw) || 0;
+    // Commission payout from COMMISSION_AMOUNT (Nullable if absent)
+    const commissionRaw = params.amount || params.commission || params.COMMISSION_AMOUNT || params.payout;
+    const amountCommission = commissionRaw ? parseFloat(commissionRaw) : null;
 
     // Gross basket amount if provided
-    const grossRaw = params.gross || params.gross_amount || params.total || undefined;
-    const grossAmount = grossRaw ? parseFloat(grossRaw) : undefined;
+    const grossRaw = params.gross || params.gross_amount || params.total;
+    const amountGross = grossRaw ? parseFloat(grossRaw) : null;
 
-    // Currency
-    const currency = (params.currency || 'USD').toUpperCase();
+    // Currency (Nullable if absent)
+    const currency = params.currency ? params.currency.toUpperCase() : null;
 
     // Event type mapping
     const rawEvent = (params.event || params.status || 'sale').toLowerCase();
@@ -67,25 +68,15 @@ export class MaxWebAdapter implements AffiliateNetworkAdapter {
       eventType = 'rebill';
     }
 
-    const productName = params.product || params.PRODUCT_CODENAME || params.product_name || undefined;
-    const campaignLabel = params.subid2 || params.SUBID2 || undefined;
-    const adgroupLabel = params.subid3 || params.SUBID3 || undefined;
-    const adLabel = params.subid4 || params.SUBID4 || undefined;
-
     return {
       isVerified: true,
       transactionId,
       eventType,
       currency,
-      commissionAmount,
-      grossAmount,
-      clickId,
-      productName,
-      campaignLabel,
-      adgroupLabel,
-      adLabel,
-      customerIp: params.ip || context.clientIp,
-      customerUserAgent: params.user_agent || context.headers['user-agent'],
+      amountCommission,
+      amountGross,
+      clickIdRaw: rawClickId,
+      clickIdClean,
       rawDetails: params,
     };
   }
@@ -102,11 +93,12 @@ export class MaxWebAdapter implements AffiliateNetworkAdapter {
     const url = new URL(baseUrl);
     url.searchParams.set('subid5', clickIdMacro);
     if (metadata.campaign) url.searchParams.set('subid2', metadata.campaign);
+    if (metadata.adgroup) url.searchParams.set('subid3', metadata.adgroup);
+    if (metadata.ad) url.searchParams.set('subid4', metadata.ad);
     return url.toString();
   }
 
   public buildPostbackTemplate(workspaceId: string, secretToken: string, host: string): string {
-    const cleanHost = host.replace(/\/$/, '');
-    return `${cleanHost}/api/v1/postbacks/maxweb/${secretToken}?subid5={SUBID5}&subid={SUBID}&order_id={ORDERID}&amount={COMMISSION_AMOUNT}&product={PRODUCT_CODENAME}&currency=USD&event=sale`;
+    return `https://${host}/api/v1/postbacks/maxweb/${workspaceId}/${secretToken}?orderid={ORDERID}&subid5={SUBID}&amount={COMMISSION_AMOUNT}&currency={CURRENCY}`;
   }
 }

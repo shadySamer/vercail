@@ -33,26 +33,27 @@ export class Digistore24Adapter implements AffiliateNetworkAdapter {
         verificationError: 'Missing mandatory Transaction ID in Digistore24 postback payload',
         transactionId: '',
         eventType: 'unknown',
-        currency: 'USD',
-        commissionAmount: 0,
+        currency: null,
+        amountCommission: null,
+        amountGross: null,
       };
     }
     const transactionId = rawTxId.trim();
 
     // Extract Click ID from cid / custom
     const rawClickId = params.cid || params.custom || params.CID || params.subid || undefined;
-    const clickId = extractCleanTtclid(rawClickId);
+    const clickIdClean = extractCleanTtclid(rawClickId);
 
-    // Commission payout from amount_affiliate (official Affiliate S2S macro)
-    const commissionRaw = params.amount_affiliate || params.affiliate_amount || params.payout || params.amount || '0';
-    const commissionAmount = parseFloat(commissionRaw) || 0;
+    // Commission payout from amount_affiliate (official Affiliate S2S macro) (Nullable if absent)
+    const commissionRaw = params.amount_affiliate || params.affiliate_amount || params.payout || params.amount;
+    const amountCommission = commissionRaw ? parseFloat(commissionRaw) : null;
 
     // Gross customer payment from amount_brutto / amount
-    const grossRaw = params.amount_brutto || params.gross_amount || params.amount || undefined;
-    const grossAmount = grossRaw ? parseFloat(grossRaw) : undefined;
+    const grossRaw = params.amount_brutto || params.gross_amount || params.amount;
+    const amountGross = grossRaw ? parseFloat(grossRaw) : null;
 
-    // Currency
-    const currency = (params.currency || 'USD').toUpperCase();
+    // Currency (Nullable if absent)
+    const currency = params.currency ? params.currency.toUpperCase() : null;
 
     // Event type mapping from transaction_type and order_type
     const rawEvent = (params.transaction_type || params.event || params.event_label || 'payment').toLowerCase();
@@ -69,21 +70,15 @@ export class Digistore24Adapter implements AffiliateNetworkAdapter {
       eventType = 'upsell';
     }
 
-    const productName = params.product_name || (params.product_id ? `Product #${params.product_id}` : undefined);
-    const campaignLabel = params.campaign_key || params.campaign || undefined;
-
     return {
       isVerified: true,
       transactionId,
       eventType,
       currency,
-      commissionAmount,
-      grossAmount,
-      clickId,
-      productName,
-      campaignLabel,
-      customerIp: params.ip || context.clientIp,
-      customerUserAgent: params.user_agent || context.headers['user-agent'],
+      amountCommission,
+      amountGross,
+      clickIdRaw: rawClickId,
+      clickIdClean,
       customerEmail: params.buyer_email || params.email || undefined,
       rawDetails: params,
     };
@@ -105,7 +100,6 @@ export class Digistore24Adapter implements AffiliateNetworkAdapter {
   }
 
   public buildPostbackTemplate(workspaceId: string, secretToken: string, host: string): string {
-    const cleanHost = host.replace(/\/$/, '');
-    return `${cleanHost}/api/v1/postbacks/digistore24/${secretToken}?cid={cid}&transaction_id={transaction_id}&order_type={order_type}&amount_affiliate={amount_affiliate}&amount_brutto={amount_brutto}&currency={currency}&transaction_type={transaction_type}&product_id={product_id}`;
+    return `https://${host}/api/v1/postbacks/digistore24/${workspaceId}/${secretToken}?transaction_id={transaction_id}&cid={cid}&amount_affiliate={amount_affiliate}&currency={currency}`;
   }
 }

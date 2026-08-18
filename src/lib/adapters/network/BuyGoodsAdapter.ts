@@ -20,8 +20,9 @@ export class BuyGoodsAdapter implements AffiliateNetworkAdapter {
         verificationError: 'Missing mandatory Order ID in BuyGoods postback payload',
         transactionId: '',
         eventType: 'unknown',
-        currency: 'USD',
-        commissionAmount: 0,
+        currency: null,
+        amountCommission: null,
+        amountGross: null,
       };
     }
     const transactionId = rawTxId.trim();
@@ -37,18 +38,18 @@ export class BuyGoodsAdapter implements AffiliateNetworkAdapter {
       params.click_id ||
       undefined;
 
-    const clickId = extractCleanTtclid(rawClickId);
+    const clickIdClean = extractCleanTtclid(rawClickId);
 
-    // Commission payout
-    const commissionRaw = params.amount || params.commission || params.COMMISSION_AMOUNT || params.payout || '0';
-    const commissionAmount = parseFloat(commissionRaw) || 0;
+    // Commission payout (Nullable if absent)
+    const commissionRaw = params.amount || params.commission || params.COMMISSION_AMOUNT || params.payout;
+    const amountCommission = commissionRaw ? parseFloat(commissionRaw) : null;
 
     // Gross basket amount
-    const grossRaw = params.gross || params.gross_amount || params.total || undefined;
-    const grossAmount = grossRaw ? parseFloat(grossRaw) : undefined;
+    const grossRaw = params.gross || params.gross_amount || params.total;
+    const amountGross = grossRaw ? parseFloat(grossRaw) : null;
 
-    // Currency
-    const currency = (params.currency || 'USD').toUpperCase();
+    // Currency (Nullable if absent)
+    const currency = params.currency ? params.currency.toUpperCase() : null;
 
     // Event type mapping
     const rawEvent = (params.event || params.status || params.action || 'purchase').toLowerCase();
@@ -63,21 +64,15 @@ export class BuyGoodsAdapter implements AffiliateNetworkAdapter {
       eventType = 'rebill';
     }
 
-    const productName = params.product || params.PRODUCT_CODENAME || params.product_codename || undefined;
-    const campaignLabel = params.subid2 || params.SUBID2 || undefined;
-
     return {
       isVerified: true,
       transactionId,
       eventType,
       currency,
-      commissionAmount,
-      grossAmount,
-      clickId,
-      productName,
-      campaignLabel,
-      customerIp: params.ip || context.clientIp,
-      customerUserAgent: params.user_agent || context.headers['user-agent'],
+      amountCommission,
+      amountGross,
+      clickIdRaw: rawClickId,
+      clickIdClean,
       rawDetails: params,
     };
   }
@@ -98,7 +93,6 @@ export class BuyGoodsAdapter implements AffiliateNetworkAdapter {
   }
 
   public buildPostbackTemplate(workspaceId: string, secretToken: string, host: string): string {
-    const cleanHost = host.replace(/\/$/, '');
-    return `${cleanHost}/api/v1/postbacks/buygoods/${secretToken}?subid={SUBID}&subid5={SUBID5}&order_id={ORDERID}&amount={COMMISSION_AMOUNT}&product={PRODUCT_CODENAME}`;
+    return `https://${host}/api/v1/postbacks/buygoods/${workspaceId}/${secretToken}?orderid={ORDERID}&subid={SUBID}&amount={COMMISSION_AMOUNT}&currency={CURRENCY}`;
   }
 }

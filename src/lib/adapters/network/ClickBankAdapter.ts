@@ -55,8 +55,9 @@ export class ClickBankAdapter implements AffiliateNetworkAdapter {
         verificationError: 'Missing mandatory Receipt ID in ClickBank postback payload',
         transactionId: '',
         eventType: 'unknown',
-        currency: 'USD',
-        commissionAmount: 0,
+        currency: null,
+        amountCommission: null,
+        amountGross: null,
       };
     }
     const transactionId = rawTxId.trim();
@@ -71,16 +72,16 @@ export class ClickBankAdapter implements AffiliateNetworkAdapter {
       rawClickId = payload.aff_sub1 || payload.aff_sub5 || payload.tid || payload.subid || payload.tracking_code || undefined;
     }
 
-    const clickId = extractCleanTtclid(rawClickId);
+    const clickIdClean = extractCleanTtclid(rawClickId);
 
     // Financial calculations: ClickBank separates totalAccountAmount (affiliate payout) from totalOrderAmount (gross)
-    const commissionRaw = payload.totalAccountAmount || payload.amount || payload.commission || payload.payout || '0';
-    const commissionAmount = parseFloat(commissionRaw) || 0;
+    const commissionRaw = payload.totalAccountAmount || payload.amount || payload.commission || payload.payout;
+    const amountCommission = commissionRaw ? parseFloat(commissionRaw) : null;
 
-    const grossRaw = payload.totalOrderAmount || payload.gross_amount || payload.total || undefined;
-    const grossAmount = grossRaw ? parseFloat(grossRaw) : undefined;
+    const grossRaw = payload.totalOrderAmount || payload.gross_amount || payload.total;
+    const amountGross = grossRaw ? parseFloat(grossRaw) : null;
 
-    const currency = (payload.currency || 'USD').toUpperCase();
+    const currency = payload.currency ? payload.currency.toUpperCase() : null;
 
     // Transaction Type mapping
     const txType = (payload.transactionType || payload.event || payload.action || 'SALE').toUpperCase();
@@ -100,28 +101,15 @@ export class ClickBankAdapter implements AffiliateNetworkAdapter {
       eventType = 'upsell';
     }
 
-    let productName: string | undefined;
-    if (Array.isArray(payload.lineItems) && payload.lineItems.length > 0) {
-      const firstItem = payload.lineItems[0];
-      productName = firstItem.productTitle || firstItem.itemNo || undefined;
-    } else {
-      productName = payload.product || payload.product_name || payload.item || undefined;
-    }
-
-    const campaignLabel = payload.campaign || payload.tracking_campaign || undefined;
-
     return {
       isVerified: true,
       transactionId,
       eventType,
       currency,
-      commissionAmount,
-      grossAmount,
-      clickId,
-      productName,
-      campaignLabel,
-      customerIp: payload.customer?.billing?.address?.ip || context.clientIp,
-      customerUserAgent: payload.user_agent || context.headers['user-agent'],
+      amountCommission,
+      amountGross,
+      clickIdRaw: rawClickId,
+      clickIdClean,
       customerEmail: payload.customer?.billing?.email || payload.email || undefined,
       rawDetails: payload,
     };
@@ -138,13 +126,11 @@ export class ClickBankAdapter implements AffiliateNetworkAdapter {
   public buildDirectLink(baseUrl: string, clickIdMacro: string, metadata: Record<string, string> = {}): string {
     const url = new URL(baseUrl);
     url.searchParams.set('extclid', clickIdMacro);
-    if (metadata.campaign) url.searchParams.set('campaign', metadata.campaign);
-    url.searchParams.set('traffic_source', 'tiktok');
+    if (metadata.campaign) url.searchParams.set('aff_sub2', metadata.campaign);
     return url.toString();
   }
 
   public buildPostbackTemplate(workspaceId: string, secretToken: string, host: string): string {
-    const cleanHost = host.replace(/\/$/, '');
-    return `${cleanHost}/api/v1/postbacks/clickbank/${secretToken}?extclid={extclid}&receipt={receipt}&amount={amount}&transactionType={transactionType}&currency={currency}`;
+    return `https://${host}/api/v1/postbacks/clickbank/${workspaceId}/${secretToken}?receipt={receipt}&extclid={extclid}&amount={amount}&currency={currency}`;
   }
 }

@@ -6,9 +6,10 @@ import { OutboxJob, DeliveryAttempt } from '../types';
 
 export class OutboxWorker {
   private isPolling = false;
+  private workerId = `worker_${process.pid || 1}_${uuidv4().substring(0, 8)}`;
 
   /**
-   * Process a single Outbox Job with durability and full audit trail
+   * Process a single claimed Outbox Job with durability and full audit trail
    */
   public async processTask(job: OutboxJob): Promise<{ success: boolean; error?: string }> {
     const conversion = db.getConversionById(job.conversionId);
@@ -20,25 +21,26 @@ export class OutboxWorker {
       return { success: false, error: 'Conversion missing' };
     }
 
-    // Resolve Destination
+    // Resolve Destination (Strict Tenant Boundary)
     const destination = db.getDestinationById(job.destinationId, job.workspaceId);
     if (!destination) {
       job.status = 'failed_permanent';
       job.lastError = `Target TikTok Destination (${job.destinationId}) not found in workspace`;
       job.updatedAt = new Date().toISOString();
-      conversion.status = 'failed_permanent';
+      conversion.status = 'configuration_error';
       conversion.errorMessage = job.lastError;
       conversion.processedAt = new Date().toISOString();
       db.saveOutboxJob(job);
-      db.saveConversion(conversion);
       return { success: false, error: job.lastError };
     }
 
     // Decrypt Access Token
     const accessToken = decryptSecret(destination.accessTokenEncrypted);
 
+    // Explicit Simulation Mode Check (Never guess based on strings in production)
+    const isSimulated = process.env.SIMULATION_MODE === 'true';
+
     // Dispatch to TikTok Events API
-    const isSimulated = accessToken.includes('demo') || accessToken.includes('sim') || accessToken.includes('test');
     const dispatchResult = await tikTokAdsAdapter.dispatchConversion(
       conversion,
       destination,
@@ -80,12 +82,11 @@ export class OutboxWorker {
       db.saveOutboxJob(job);
       db.saveConversion(conversion);
 
-      // Update Health
+      // Update Health Stats
       const healthList = db.getIntegrationHealth(job.workspaceId);
       const health = healthList.find(h => h.integrationId === conversion.integrationId);
       if (health) {
         health.lastTikTokDeliveryAt = new Date().toISOString();
-        health.totalConversionsProcessed += 1;
         const total = health.totalConversionsProcessed;
         const failed = health.failedDeliveriesCount;
         health.deliveryRate = total > 0 ? Math.round(((total - failed) / total) * 100) : 100;
@@ -131,29 +132,23 @@ export class OutboxWorker {
   }
 
   /**
-   * Poll and process all pending and retryable outbox jobs across server restarts
+   * Poll and atomically claim pending and retryable outbox jobs with visibility leases
+   * Prevents two parallel workers from processing the same job.
    */
-  public async pollAndProcess(limit: number = 50): Promise<{ processed: number; succeeded: number; failed: number }> {
-    if (this.isPolling) return { processed: 0, succeeded: 0, failed: 0 };
-    this.isPolling = true;
-
+  public async pollAndProcess(limit: number = 50, leaseSeconds: number = 60): Promise<{ processed: number; succeeded: number; failed: number }> {
     let processed = 0;
     let succeeded = 0;
     let failed = 0;
 
-    try {
-      const pendingJobs = db.getPendingOutboxJobs(limit);
-      for (const job of pendingJobs) {
-        processed++;
-        const result = await this.processTask(job);
-        if (result.success) {
-          succeeded++;
-        } else {
-          failed++;
-        }
+    const claimedJobs = await db.claimPendingOutboxJobs(this.workerId, limit, leaseSeconds);
+    for (const job of claimedJobs) {
+      processed++;
+      const result = await this.processTask(job);
+      if (result.success) {
+        succeeded++;
+      } else {
+        failed++;
       }
-    } finally {
-      this.isPolling = false;
     }
 
     return { processed, succeeded, failed };

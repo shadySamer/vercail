@@ -110,18 +110,20 @@ export class AnalyticsEngine {
         failedDeliveries++;
       }
 
+      const comm = c.commissionAmount !== null && c.commissionAmount !== undefined ? c.commissionAmount : 0;
+
       if (c.eventType === 'refund' || c.eventType === 'chargeback') {
-        refundedCommission += c.commissionAmount;
+        refundedCommission += comm;
         netStats[netKey].refunds += 1;
-        netStats[netKey].refundedCommission += c.commissionAmount;
+        netStats[netKey].refundedCommission += comm;
       } else if (c.eventType === 'upsell') {
-        grossCommission += c.commissionAmount;
+        grossCommission += comm;
         netStats[netKey].upsells += 1;
-        netStats[netKey].grossCommission += c.commissionAmount;
+        netStats[netKey].grossCommission += comm;
       } else {
-        grossCommission += c.commissionAmount;
+        grossCommission += comm;
         netStats[netKey].initialSales += 1;
-        netStats[netKey].grossCommission += c.commissionAmount;
+        netStats[netKey].grossCommission += comm;
       }
     }
 

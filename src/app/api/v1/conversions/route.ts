@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db/store';
-import { DEFAULT_WORKSPACE_ID } from '@/lib/db/seed';
+import { getAuthenticatedWorkspace } from '@/lib/security/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthenticatedWorkspace(request);
+  if (!auth) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const workspaceId = auth.workspaceId;
   const url = new URL(request.url);
-  const workspaceId = url.searchParams.get('workspaceId') || DEFAULT_WORKSPACE_ID;
   const statusFilter = url.searchParams.get('status');
   const networkFilter = url.searchParams.get('network');
   const search = url.searchParams.get('search')?.toLowerCase();
@@ -23,8 +28,7 @@ export async function GET(request: NextRequest) {
     conversions = conversions.filter(c =>
       c.transactionId.toLowerCase().includes(search) ||
       (c.clickId && c.clickId.toLowerCase().includes(search)) ||
-      (c.offerName && c.offerName.toLowerCase().includes(search)) ||
-      (c.campaignId && c.campaignId.toLowerCase().includes(search))
+      (c.offerName && c.offerName.toLowerCase().includes(search))
     );
   }
 

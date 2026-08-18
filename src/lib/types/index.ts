@@ -52,6 +52,15 @@ export interface User {
   createdAt: string;
 }
 
+export interface Session {
+  id: string;
+  userId: string;
+  workspaceId: string;
+  token: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
 export interface TikTokDestination {
   id: string;
   workspaceId: string;
@@ -69,9 +78,9 @@ export interface AffiliateIntegration {
   workspaceId: string;
   network: NetworkType;
   name: string;
-  secretToken: string; // Unique token in postback URL
+  secretToken: string; // Unique cryptographically secure token in postback URL
   webhookSecretEncrypted?: string; // Passphrase or secret key for signature check
-  destinationId?: string; // Explicitly assigned TikTokDestination ID (No random fallback)
+  destinationId?: string; // Explicitly assigned TikTokDestination ID (Zero fallback)
   eventName?: string; // Override event name (if different from destination default)
   valueStrategy: ValueStrategy; // 'commission' | 'gross' | 'none'
   status: 'connected' | 'disconnected' | 'error';
@@ -79,7 +88,6 @@ export interface AffiliateIntegration {
   accountName?: string; // Backward compatibility alias
 }
 
-// Backward compatibility alias for Pixel & NetworkAccount during migration
 export type Pixel = TikTokDestination;
 export type NetworkAccount = AffiliateIntegration;
 
@@ -94,7 +102,7 @@ export interface RawInboundEvent {
   rawPayload: string;
   clientIp: string;
   verificationStatus: 'verified' | 'unverified' | 'failed_signature' | 'invalid_token';
-  processingStatus: 'processed' | 'duplicate' | 'failed' | 'quarantined';
+  processingStatus: 'received' | 'verified' | 'parsed' | 'processed' | 'duplicate' | 'invalid' | 'quarantined' | 'failed';
   errorMessage?: string;
   receivedAt: string;
 }
@@ -112,9 +120,9 @@ export interface CanonicalConversion {
   eventType: CanonicalEventType;
   tiktokEventName: string; // Exact event name sent to TikTok
   valueStrategy: ValueStrategy;
-  currency: string;
-  commissionAmount: number;
-  grossAmount?: number;
+  currency: string | null; // Nullable if network didn't specify (Never invent fake USD)
+  commissionAmount: number | null; // Nullable if network didn't specify (Never invent fake 0)
+  grossAmount?: number | null;
   clickId?: string; // Cleaned ttclid (without wrapper)
   status: ConversionStatus;
   idempotencyKey: string; // Unique deterministic SHA-256 hash
@@ -122,20 +130,13 @@ export interface CanonicalConversion {
   receivedAt: string;
   processedAt?: string;
 
-  // Backward compatibility optional fields
+  // Compatibility aliases
   networkAccountId?: string;
   targetEventName?: string;
+  resolvedPixelId?: string;
   trafficSource?: string;
   offerName?: string;
   productName?: string;
-  campaignId?: string;
-  adgroupId?: string;
-  adId?: string;
-  creativeId?: string;
-  resolvedPixelId?: string;
-  resolvedAdAccountId?: string;
-  customerIp?: string;
-  customerUserAgent?: string;
 }
 
 export interface OutboxJob {
@@ -149,6 +150,9 @@ export interface OutboxJob {
   attempts: number;
   maxAttempts: number;
   nextRetryAt: string;
+  claimedAt?: string;
+  leaseTimeoutAt?: string;
+  workerId?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -190,8 +194,6 @@ export interface IntegrationHealth {
   attributionRate: number;
   deliveryRate: number;
   updatedAt: string;
-
-  // Compatibility alias
   networkAccountId?: string;
 }
 
@@ -202,16 +204,11 @@ export interface NormalizedNetworkResult {
   parentTransactionId?: string;
   orderItemId?: string;
   eventType: CanonicalEventType;
-  currency: string;
-  commissionAmount: number;
-  grossAmount?: number;
-  clickId?: string; // Clean ttclid stripped of wrappers
-  productName?: string;
-  campaignLabel?: string;
-  adgroupLabel?: string;
-  adLabel?: string;
-  customerIp?: string;
-  customerUserAgent?: string;
+  amountCommission: number | null; // Nullable
+  amountGross: number | null; // Nullable
+  currency: string | null; // Nullable
+  clickIdRaw?: string;
+  clickIdClean?: string;
   customerEmail?: string;
   rawDetails?: Record<string, any>;
 }

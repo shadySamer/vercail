@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "tsx tests/run_all_tests.ts"
+    "test": "tsx tests/run_production_hardening_tests.ts"
   },
   "keywords": [],
   "author": "",

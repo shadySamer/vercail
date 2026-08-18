@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db/store';
 import { networkRegistry } from '@/lib/adapters/network/NetworkRegistry';
-import { DEFAULT_WORKSPACE_ID } from '@/lib/db/seed';
+import { getAuthenticatedWorkspace } from '@/lib/security/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
-  const url = new URL(request.url);
-  const workspaceId = url.searchParams.get('workspaceId') || DEFAULT_WORKSPACE_ID;
+  const auth = getAuthenticatedWorkspace(request);
+  if (!auth) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const workspaceId = auth.workspaceId;
 
   const integrationHealth = db.getIntegrationHealth(workspaceId);
   const capabilityMatrix = networkRegistry.getCapabilityMatrix();

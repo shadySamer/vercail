@@ -2,19 +2,30 @@ import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '@/lib/db/store';
 import { postbackGenerator } from '@/lib/engine/PostbackGenerator';
-import { encryptSecret } from '@/lib/security/crypto';
-import { DEFAULT_WORKSPACE_ID } from '@/lib/db/seed';
+import { encryptSecret, generateSecureToken, maskSecret } from '@/lib/security/crypto';
+import { getAuthenticatedWorkspace } from '@/lib/security/auth';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
+  const auth = getAuthenticatedWorkspace(request);
+  if (!auth) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const workspaceId = auth.workspaceId;
   const url = new URL(request.url);
-  const workspaceId = url.searchParams.get('workspaceId') || DEFAULT_WORKSPACE_ID;
   const origin = url.origin;
 
   const workspaces = db.getWorkspaces();
   const destinations = db.getDestinations(workspaceId);
   const integrations = db.getIntegrations(workspaceId);
+
+  // Mask encrypted access tokens in destination response
+  const sanitizedDestinations = destinations.map(d => ({
+    ...d,
+    accessTokenEncrypted: '••••••••',
+  }));
 
   // Enrich integrations with direct linking instructions and postback URLs
   const enrichedIntegrations = integrations.map(i => {
@@ -41,22 +52,32 @@ export async function GET(request: NextRequest) {
       postbackUrl,
       clickIdMacro,
       exampleUrl,
-      assignedDestination,
+      assignedDestination: assignedDestination ? {
+        id: assignedDestination.id,
+        name: assignedDestination.name,
+        pixelId: assignedDestination.pixelId,
+        defaultEventName: assignedDestination.defaultEventName,
+      } : undefined,
     };
   });
 
   return NextResponse.json({
-    workspace: workspaces.find(w => w.id === workspaceId) || workspaces[0],
-    destinations,
+    workspace: workspaces.find(w => w.id === workspaceId) || { id: workspaceId, name: 'Production Workspace' },
+    destinations: sanitizedDestinations,
     integrations: enrichedIntegrations,
   });
 }
 
 export async function POST(request: NextRequest) {
   try {
+    const auth = getAuthenticatedWorkspace(request);
+    if (!auth) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const workspaceId = auth.workspaceId;
     const body = await request.json();
     const action = body.action;
-    const workspaceId = body.workspaceId || DEFAULT_WORKSPACE_ID;
 
     // Action 1: Save / Update TikTok Destination
     if (action === 'save_destination' || action === 'save_pixel') {
@@ -83,12 +104,15 @@ export async function POST(request: NextRequest) {
         }
         db.saveDestination(targetDestination);
       } else {
+        if (!accessToken) {
+          return NextResponse.json({ error: 'Events API Access Token is required' }, { status: 400 });
+        }
         targetDestination = {
           id: uuidv4(),
           workspaceId,
           name,
           pixelId,
-          accessTokenEncrypted: accessToken ? encryptSecret(accessToken) : encryptSecret('dummy_token'),
+          accessTokenEncrypted: encryptSecret(accessToken),
           defaultEventName,
           testEventCode,
           status: 'active',
@@ -97,7 +121,13 @@ export async function POST(request: NextRequest) {
         db.saveDestination(targetDestination);
       }
 
-      return NextResponse.json({ success: true, destination: targetDestination });
+      return NextResponse.json({
+        success: true,
+        destination: {
+          ...targetDestination,
+          accessTokenEncrypted: '••••••••',
+        },
+      });
     }
 
     // Action 2: Update Affiliate Integration Routing & Value Strategy
@@ -125,7 +155,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, integration });
     }
 
-    // Action 3: Delete TikTok Destination
+    // Action 3: Delete TikTok Destination (Strict Tenant Boundary)
     if (action === 'delete_destination') {
       const destinationId = body.id || body.destinationId;
       if (!destinationId) {
@@ -135,7 +165,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: deleted });
     }
 
-    // Action 4: Delete Affiliate Integration
+    // Action 4: Delete Affiliate Integration (Strict Tenant Boundary)
     if (action === 'delete_integration') {
       const integrationId = body.id || body.integrationId;
       if (!integrationId) {
@@ -145,17 +175,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: deleted });
     }
 
-    // Action 5: Add New Custom Integration Channel
+    // Action 5: Add New Custom Integration Channel (CSPRNG Token)
     if (action === 'add_integration') {
       const network = body.network;
       const name = body.name?.trim() || `${network.toUpperCase()} S2S Channel`;
-      const secretToken = body.secretToken?.trim() || `${network.substring(0, 2)}_live_sec_${Math.floor(100000 + Math.random() * 900000)}`;
+      const secretToken = body.secretToken?.trim() || generateSecureToken(network.substring(0, 2));
       const destinationId = body.destinationId || undefined;
       const eventName = body.eventName || 'CompletePayment';
       const valueStrategy = body.valueStrategy || 'commission';
 
       const newIntegration = {
-        id: `int-${network}-${Date.now().toString(36)}`,
+        id: `int-${network}-${uuidv4().substring(0, 8)}`,
         workspaceId,
         network,
         name,
@@ -171,14 +201,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, integration: newIntegration });
     }
 
-    // Action 6: Regenerate Secret Token
+    // Action 6: Cryptographically Secure Token Rotation
     if (action === 'regenerate_token') {
       const integrationId = body.integrationId;
       const integration = db.getIntegrationById(integrationId, workspaceId);
       if (!integration) {
         return NextResponse.json({ error: 'Integration channel not found' }, { status: 404 });
       }
-      const newToken = `${integration.network.substring(0, 2)}_live_sec_${Math.floor(100000 + Math.random() * 900000)}`;
+      const newToken = generateSecureToken(integration.network.substring(0, 2));
       integration.secretToken = newToken;
       db.saveIntegration(integration);
       return NextResponse.json({ success: true, secretToken: newToken });

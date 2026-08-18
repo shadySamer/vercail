@@ -1,9 +1,11 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { PostgresDatabaseStore } from './postgres';
 import {
   Workspace,
   User,
+  Session,
   TikTokDestination,
   AffiliateIntegration,
   RawInboundEvent,
@@ -14,260 +16,547 @@ import {
   NetworkType,
 } from '../types';
 
-class RelationalDatabaseStore {
+export interface AtomicIngestionPayload {
+  rawEvent: RawInboundEvent;
+  idempotencyKey: string;
+  conversion: CanonicalConversion;
+  outboxJob?: OutboxJob;
+}
+
+export class RelationalDatabaseStore {
+  private isPostgres = false;
+  private pgStore?: PostgresDatabaseStore;
   private db!: Database.Database;
 
   constructor() {
-    this.initDatabase();
+    this.init();
   }
 
-  private initDatabase() {
-    try {
-      const isVercel = !!process.env.VERCEL;
-      let dataDir: string;
+  private init() {
+    const isBuildPhase =
+      process.env.NEXT_PHASE === 'phase-production-build' ||
+      process.env.npm_lifecycle_event === 'build' ||
+      process.argv.some(arg => arg.includes('build'));
+    const isProduction = (process.env.NODE_ENV === 'production' || !!process.env.VERCEL) && !isBuildPhase;
+    const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL;
 
-      if (isVercel) {
-        dataDir = '/tmp';
-      } else {
-        dataDir = path.join(process.cwd(), 'data');
-        if (!fs.existsSync(dataDir)) {
-          try {
-            fs.mkdirSync(dataDir, { recursive: true });
-          } catch {
-            dataDir = path.join(process.cwd());
-          }
+    // Strict Fail-Closed Check in Production at runtime
+    if (isProduction && !databaseUrl) {
+      throw new Error(
+        'FATAL: DATABASE_URL environment variable is strictly required in production environment. Refusing to run in ephemeral/in-memory mode.'
+      );
+    }
+
+    if (databaseUrl) {
+      this.isPostgres = true;
+      this.pgStore = new PostgresDatabaseStore(databaseUrl);
+    } else {
+      // Local Development & Automated Test Runner (SQLite)
+      this.isPostgres = false;
+      const dataDir = path.join(process.cwd(), 'data');
+      if (!fs.existsSync(dataDir)) {
+        try {
+          fs.mkdirSync(dataDir, { recursive: true });
+        } catch {
+          // ignore
         }
       }
-
-      const dbPath = path.join(dataDir, 'hub_production.sqlite');
+      const dbPath = path.join(dataDir, 'hub_development.sqlite');
       this.db = new Database(dbPath);
-
-      // Pragmas for performance and durability
       try {
         this.db.pragma('journal_mode = WAL');
       } catch {
-        // WAL may not be supported on all serverless filesystems; fallback to default
+        // WAL may not be supported on all filesystems
       }
       this.db.pragma('synchronous = NORMAL');
+      this.db.pragma('foreign_keys = ON');
 
-      this.initSchema();
-    } catch (err) {
-      console.warn('SQLite init fallback to in-memory:', err);
-      this.db = new Database(':memory:');
-      this.initSchema();
+      this.initSqliteSchema();
     }
   }
 
-  private initSchema() {
-    try {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS workspaces (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
-          slug TEXT NOT NULL UNIQUE,
-          created_at TEXT NOT NULL
-        );
+  private initSqliteSchema() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        slug TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      );
 
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          email TEXT NOT NULL UNIQUE,
-          password_hash TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'owner',
-          created_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'owner',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
 
-        CREATE TABLE IF NOT EXISTS tiktok_destinations (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          name TEXT NOT NULL,
-          pixel_id TEXT NOT NULL,
-          access_token_encrypted TEXT NOT NULL,
-          default_event_name TEXT NOT NULL DEFAULT 'CompletePayment',
-          test_event_code TEXT,
-          status TEXT NOT NULL DEFAULT 'active',
-          created_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
 
-        CREATE TABLE IF NOT EXISTS affiliate_integrations (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          network TEXT NOT NULL,
-          name TEXT NOT NULL,
-          secret_token TEXT NOT NULL UNIQUE,
-          webhook_secret_encrypted TEXT,
-          destination_id TEXT,
-          event_name TEXT,
-          value_strategy TEXT NOT NULL DEFAULT 'commission',
-          status TEXT NOT NULL DEFAULT 'connected',
-          created_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS tiktok_destinations (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        pixel_id TEXT NOT NULL,
+        access_token_encrypted TEXT NOT NULL,
+        default_event_name TEXT NOT NULL DEFAULT 'CompletePayment',
+        test_event_code TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
 
-        CREATE TABLE IF NOT EXISTS raw_inbound_events (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          network TEXT NOT NULL,
-          integration_id TEXT,
-          headers TEXT NOT NULL,
-          query_params TEXT NOT NULL,
-          body TEXT NOT NULL,
-          raw_payload TEXT NOT NULL,
-          client_ip TEXT NOT NULL,
-          verification_status TEXT NOT NULL,
-          processing_status TEXT NOT NULL,
-          error_message TEXT,
-          received_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS affiliate_integrations (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        network TEXT NOT NULL,
+        name TEXT NOT NULL,
+        secret_token TEXT NOT NULL UNIQUE,
+        webhook_secret_encrypted TEXT,
+        destination_id TEXT,
+        event_name TEXT,
+        value_strategy TEXT NOT NULL DEFAULT 'commission',
+        status TEXT NOT NULL DEFAULT 'connected',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (destination_id) REFERENCES tiktok_destinations(id) ON DELETE SET NULL
+      );
 
-        CREATE TABLE IF NOT EXISTS idempotency_records (
-          idempotency_key TEXT PRIMARY KEY,
-          conversion_id TEXT NOT NULL,
-          network TEXT NOT NULL,
-          created_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS raw_inbound_events (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        network TEXT NOT NULL,
+        integration_id TEXT,
+        headers TEXT NOT NULL,
+        query_params TEXT NOT NULL,
+        body TEXT NOT NULL,
+        raw_payload TEXT NOT NULL,
+        client_ip TEXT NOT NULL,
+        verification_status TEXT NOT NULL,
+        processing_status TEXT NOT NULL,
+        error_message TEXT,
+        received_at TEXT NOT NULL
+      );
 
-        CREATE TABLE IF NOT EXISTS conversions (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          raw_event_id TEXT NOT NULL,
-          network TEXT NOT NULL,
-          integration_id TEXT NOT NULL,
-          destination_id TEXT,
-          transaction_id TEXT NOT NULL,
-          parent_transaction_id TEXT,
-          order_item_id TEXT,
-          event_type TEXT NOT NULL,
-          tiktok_event_name TEXT NOT NULL,
-          value_strategy TEXT NOT NULL DEFAULT 'commission',
-          currency TEXT NOT NULL,
-          commission_amount REAL NOT NULL DEFAULT 0,
-          gross_amount REAL,
-          click_id TEXT,
-          status TEXT NOT NULL,
-          idempotency_key TEXT NOT NULL UNIQUE,
-          error_message TEXT,
-          received_at TEXT NOT NULL,
-          processed_at TEXT
-        );
+      CREATE TABLE IF NOT EXISTS idempotency_records (
+        idempotency_key TEXT PRIMARY KEY,
+        conversion_id TEXT NOT NULL,
+        network TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
 
-        CREATE TABLE IF NOT EXISTS outbox_jobs (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          conversion_id TEXT NOT NULL,
-          destination_id TEXT NOT NULL,
-          tiktok_event_name TEXT NOT NULL,
-          payload TEXT NOT NULL,
-          status TEXT NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          max_attempts INTEGER NOT NULL DEFAULT 5,
-          next_retry_at TEXT NOT NULL,
-          last_error TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS conversions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        raw_event_id TEXT NOT NULL,
+        network TEXT NOT NULL,
+        integration_id TEXT NOT NULL,
+        destination_id TEXT,
+        transaction_id TEXT NOT NULL,
+        parent_transaction_id TEXT,
+        order_item_id TEXT,
+        event_type TEXT NOT NULL,
+        tiktok_event_name TEXT NOT NULL,
+        value_strategy TEXT NOT NULL DEFAULT 'commission',
+        currency TEXT,
+        commission_amount REAL,
+        gross_amount REAL,
+        click_id TEXT,
+        status TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        error_message TEXT,
+        received_at TEXT NOT NULL,
+        processed_at TEXT,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+      );
 
-        CREATE TABLE IF NOT EXISTS delivery_attempts (
-          id TEXT PRIMARY KEY,
-          outbox_job_id TEXT NOT NULL,
-          conversion_id TEXT NOT NULL,
-          destination_id TEXT NOT NULL,
-          pixel_id TEXT NOT NULL,
-          event_name TEXT NOT NULL,
-          status_code INTEGER NOT NULL,
-          latency_ms INTEGER NOT NULL,
-          request_payload TEXT NOT NULL,
-          response_body TEXT NOT NULL,
-          is_success INTEGER NOT NULL,
-          error_classification TEXT,
-          error_message TEXT,
-          attempted_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS outbox_jobs (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        conversion_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        tiktok_event_name TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 5,
+        next_retry_at TEXT NOT NULL,
+        claimed_at TEXT,
+        lease_timeout_at TEXT,
+        worker_id TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (conversion_id) REFERENCES conversions(id) ON DELETE CASCADE
+      );
 
-        CREATE TABLE IF NOT EXISTS integration_health (
-          id TEXT PRIMARY KEY,
-          workspace_id TEXT NOT NULL,
-          integration_id TEXT NOT NULL UNIQUE,
-          network TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'healthy',
-          last_postback_at TEXT,
-          last_conversion_at TEXT,
-          last_tiktok_delivery_at TEXT,
-          total_postbacks_received INTEGER NOT NULL DEFAULT 0,
-          total_conversions_processed INTEGER NOT NULL DEFAULT 0,
-          missing_click_id_count INTEGER NOT NULL DEFAULT 0,
-          duplicate_count INTEGER NOT NULL DEFAULT 0,
-          failed_deliveries_count INTEGER NOT NULL DEFAULT 0,
-          attribution_rate REAL NOT NULL DEFAULT 100,
-          delivery_rate REAL NOT NULL DEFAULT 100,
-          updated_at TEXT NOT NULL
-        );
+      CREATE TABLE IF NOT EXISTS delivery_attempts (
+        id TEXT PRIMARY KEY,
+        outbox_job_id TEXT NOT NULL,
+        conversion_id TEXT NOT NULL,
+        destination_id TEXT NOT NULL,
+        pixel_id TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        status_code INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        request_payload TEXT NOT NULL,
+        response_body TEXT NOT NULL,
+        is_success INTEGER NOT NULL,
+        error_classification TEXT,
+        error_message TEXT,
+        attempted_at TEXT NOT NULL,
+        FOREIGN KEY (outbox_job_id) REFERENCES outbox_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (conversion_id) REFERENCES conversions(id) ON DELETE CASCADE
+      );
 
-        CREATE INDEX IF NOT EXISTS idx_conversions_workspace ON conversions(workspace_id);
-        CREATE INDEX IF NOT EXISTS idx_conversions_transaction ON conversions(integration_id, transaction_id);
-        CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_jobs(status, next_retry_at);
-        CREATE INDEX IF NOT EXISTS idx_raw_events_workspace ON raw_inbound_events(workspace_id);
-      `);
+      CREATE TABLE IF NOT EXISTS integration_health (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        integration_id TEXT NOT NULL UNIQUE,
+        network TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'healthy',
+        last_postback_at TEXT,
+        last_conversion_at TEXT,
+        last_tiktok_delivery_at TEXT,
+        total_postbacks_received INTEGER NOT NULL DEFAULT 0,
+        total_conversions_processed INTEGER NOT NULL DEFAULT 0,
+        missing_click_id_count INTEGER NOT NULL DEFAULT 0,
+        duplicate_count INTEGER NOT NULL DEFAULT 0,
+        failed_deliveries_count INTEGER NOT NULL DEFAULT 0,
+        attribution_rate REAL NOT NULL DEFAULT 100,
+        delivery_rate REAL NOT NULL DEFAULT 100,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+        FOREIGN KEY (integration_id) REFERENCES affiliate_integrations(id) ON DELETE CASCADE
+      );
 
-      this.seedDefaults();
-    } catch (err) {
-      console.error('Schema initialization error:', err);
-    }
+      CREATE INDEX IF NOT EXISTS idx_conversions_workspace ON conversions(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_conversions_transaction ON conversions(integration_id, transaction_id);
+      CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox_jobs(status, next_retry_at);
+      CREATE INDEX IF NOT EXISTS idx_raw_events_workspace ON raw_inbound_events(workspace_id);
+    `);
   }
 
-  private seedDefaults() {
-    try {
-      const wsCount = this.db.prepare('SELECT count(*) as c FROM workspaces').get() as any;
-      if (!wsCount || wsCount.c === 0) {
-        this.saveWorkspace({
-          id: 'ws-master-01',
-          name: 'Production Workspace',
-          slug: 'production',
-          createdAt: new Date().toISOString(),
-        });
-      }
+  // =========================================================================
+  // ATOMIC DATABASE TRANSACTION (P0 Ingestion Guarantee)
+  // =========================================================================
+  public executeAtomicConversionIngestion(payload: AtomicIngestionPayload): { success: boolean; isDuplicate?: boolean; error?: string } {
+    if (this.isPostgres && this.pgStore) {
+      // Synchronous bridge: in Node.js serverless Next.js API routes, we can use the sync/async pool query
+      throw new Error('Please call executeAtomicConversionIngestionAsync for PostgreSQL');
+    }
 
-      const intCount = this.db.prepare('SELECT count(*) as c FROM affiliate_integrations').get() as any;
-      if (!intCount || intCount.c === 0) {
-        const defaultNetworks: Array<{ network: NetworkType; name: string; token: string }> = [
-          { network: 'maxweb', name: 'MaxWeb S2S Channel', token: 'mw_live_sec_884920' },
-          { network: 'buygoods', name: 'BuyGoods S2S Channel', token: 'bg_live_sec_119284' },
-          { network: 'digistore24', name: 'Digistore24 S2S Channel', token: 'ds_live_sec_994821' },
-          { network: 'clickbank', name: 'ClickBank S2S Channel', token: 'cb_live_sec_772910' },
-        ];
+    const { rawEvent, idempotencyKey, conversion, outboxJob } = payload;
 
-        for (const n of defaultNetworks) {
-          const id = `int-${n.network}-01`;
-          this.saveIntegration({
-            id,
-            workspaceId: 'ws-master-01',
-            network: n.network,
-            name: n.name,
-            secretToken: n.token,
-            valueStrategy: 'commission',
-            status: 'connected',
-            createdAt: new Date().toISOString(),
-          });
-
-          this.updateIntegrationHealth({
-            id: `health-${n.network}-01`,
-            workspaceId: 'ws-master-01',
-            integrationId: id,
-            network: n.network,
-            status: 'healthy',
-            totalPostbacksReceived: 0,
-            totalConversionsProcessed: 0,
-            missingClickIdCount: 0,
-            duplicateCount: 0,
-            failedDeliveriesCount: 0,
-            attributionRate: 100,
-            deliveryRate: 100,
-            updatedAt: new Date().toISOString(),
-          });
+    const atomicTx = this.db.transaction(() => {
+      // 1. Check & Insert Idempotency Record (Atomic UNIQUE Constraint)
+      try {
+        this.db.prepare(`
+          INSERT INTO idempotency_records (idempotency_key, conversion_id, network, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(idempotencyKey, conversion.id, conversion.network, conversion.receivedAt);
+      } catch (err: any) {
+        if (err.message?.includes('UNIQUE constraint failed: idempotency_records.idempotency_key')) {
+          return { isDuplicate: true };
         }
+        throw err;
       }
-    } catch (err) {
-      console.warn('Seed defaults notice:', err);
+
+      // 2. Insert Raw Inbound Event
+      this.db.prepare(`
+        INSERT INTO raw_inbound_events (
+          id, workspace_id, network, integration_id, headers, query_params, body,
+          raw_payload, client_ip, verification_status, processing_status, error_message, received_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          processing_status = excluded.processing_status,
+          error_message = excluded.error_message
+      `).run(
+        rawEvent.id,
+        rawEvent.workspaceId,
+        rawEvent.network,
+        rawEvent.integrationId || null,
+        JSON.stringify(rawEvent.headers || {}),
+        JSON.stringify(rawEvent.queryParams || {}),
+        JSON.stringify(rawEvent.body || {}),
+        rawEvent.rawPayload || '',
+        rawEvent.clientIp,
+        rawEvent.verificationStatus,
+        rawEvent.processingStatus,
+        rawEvent.errorMessage || null,
+        rawEvent.receivedAt
+      );
+
+      // 3. Insert Canonical Conversion
+      this.db.prepare(`
+        INSERT INTO conversions (
+          id, workspace_id, raw_event_id, network, integration_id, destination_id,
+          transaction_id, parent_transaction_id, order_item_id, event_type,
+          tiktok_event_name, value_strategy, currency, commission_amount, gross_amount,
+          click_id, status, idempotency_key, error_message, received_at, processed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conversion.id,
+        conversion.workspaceId,
+        conversion.rawEventId,
+        conversion.network,
+        conversion.integrationId,
+        conversion.destinationId || null,
+        conversion.transactionId,
+        conversion.parentTransactionId || null,
+        conversion.orderItemId || null,
+        conversion.eventType,
+        conversion.tiktokEventName,
+        conversion.valueStrategy,
+        conversion.currency || null,
+        conversion.commissionAmount !== null ? conversion.commissionAmount : null,
+        conversion.grossAmount !== null && conversion.grossAmount !== undefined ? conversion.grossAmount : null,
+        conversion.clickId || null,
+        conversion.status,
+        conversion.idempotencyKey,
+        conversion.errorMessage || null,
+        conversion.receivedAt,
+        conversion.processedAt || null
+      );
+
+      // 4. Insert Outbox Job (if attributed & destination assigned)
+      if (outboxJob) {
+        this.db.prepare(`
+          INSERT INTO outbox_jobs (
+            id, workspace_id, conversion_id, destination_id, tiktok_event_name,
+            payload, status, attempts, max_attempts, next_retry_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          outboxJob.id,
+          outboxJob.workspaceId,
+          outboxJob.conversionId,
+          outboxJob.destinationId,
+          outboxJob.tiktokEventName,
+          JSON.stringify(outboxJob.payload || {}),
+          outboxJob.status,
+          outboxJob.attempts,
+          outboxJob.maxAttempts,
+          outboxJob.nextRetryAt,
+          outboxJob.createdAt,
+          outboxJob.updatedAt
+        );
+      }
+
+      return { isDuplicate: false };
+    });
+
+    try {
+      const res = atomicTx();
+      if (res.isDuplicate) {
+        return { success: false, isDuplicate: true };
+      }
+      return { success: true };
+    } catch (err: any) {
+      if (err.message?.includes('UNIQUE constraint failed')) {
+        return { success: false, isDuplicate: true };
+      }
+      return { success: false, error: err.message };
     }
+  }
+
+  public async executeAtomicConversionIngestionAsync(payload: AtomicIngestionPayload): Promise<{ success: boolean; isDuplicate?: boolean; error?: string }> {
+    if (!this.isPostgres || !this.pgStore) {
+      return this.executeAtomicConversionIngestion(payload);
+    }
+
+    const { rawEvent, idempotencyKey, conversion, outboxJob } = payload;
+    const client = await this.pgStore.getClient();
+
+    try {
+      await client.query('BEGIN');
+
+      // 1. Insert Idempotency Record (Unique Constraint)
+      try {
+        await client.query(
+          `INSERT INTO idempotency_records (idempotency_key, conversion_id, network, created_at)
+           VALUES ($1, $2, $3, $4)`,
+          [idempotencyKey, conversion.id, conversion.network, conversion.receivedAt]
+        );
+      } catch (err: any) {
+        if (err.code === '23505') { // unique_violation in PostgreSQL
+          await client.query('ROLLBACK');
+          return { success: false, isDuplicate: true };
+        }
+        throw err;
+      }
+
+      // 2. Insert Raw Inbound Event
+      await client.query(
+        `INSERT INTO raw_inbound_events (
+          id, workspace_id, network, integration_id, headers, query_params, body,
+          raw_payload, client_ip, verification_status, processing_status, error_message, received_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        ON CONFLICT(id) DO UPDATE SET
+          processing_status = EXCLUDED.processing_status,
+          error_message = EXCLUDED.error_message`,
+        [
+          rawEvent.id,
+          rawEvent.workspaceId,
+          rawEvent.network,
+          rawEvent.integrationId || null,
+          JSON.stringify(rawEvent.headers || {}),
+          JSON.stringify(rawEvent.queryParams || {}),
+          JSON.stringify(rawEvent.body || {}),
+          rawEvent.rawPayload || '',
+          rawEvent.clientIp,
+          rawEvent.verificationStatus,
+          rawEvent.processingStatus,
+          rawEvent.errorMessage || null,
+          rawEvent.receivedAt,
+        ]
+      );
+
+      // 3. Insert Canonical Conversion
+      await client.query(
+        `INSERT INTO conversions (
+          id, workspace_id, raw_event_id, network, integration_id, destination_id,
+          transaction_id, parent_transaction_id, order_item_id, event_type,
+          tiktok_event_name, value_strategy, currency, commission_amount, gross_amount,
+          click_id, status, idempotency_key, error_message, received_at, processed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+        [
+          conversion.id,
+          conversion.workspaceId,
+          conversion.rawEventId,
+          conversion.network,
+          conversion.integrationId,
+          conversion.destinationId || null,
+          conversion.transactionId,
+          conversion.parentTransactionId || null,
+          conversion.orderItemId || null,
+          conversion.eventType,
+          conversion.tiktokEventName,
+          conversion.valueStrategy,
+          conversion.currency || null,
+          conversion.commissionAmount !== null ? conversion.commissionAmount : null,
+          conversion.grossAmount !== null && conversion.grossAmount !== undefined ? conversion.grossAmount : null,
+          conversion.clickId || null,
+          conversion.status,
+          conversion.idempotencyKey,
+          conversion.errorMessage || null,
+          conversion.receivedAt,
+          conversion.processedAt || null,
+        ]
+      );
+
+      // 4. Insert Outbox Job
+      if (outboxJob) {
+        await client.query(
+          `INSERT INTO outbox_jobs (
+            id, workspace_id, conversion_id, destination_id, tiktok_event_name,
+            payload, status, attempts, max_attempts, next_retry_at, created_at, updated_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [
+            outboxJob.id,
+            outboxJob.workspaceId,
+            outboxJob.conversionId,
+            outboxJob.destinationId,
+            outboxJob.tiktokEventName,
+            JSON.stringify(outboxJob.payload || {}),
+            outboxJob.status,
+            outboxJob.attempts,
+            outboxJob.maxAttempts,
+            outboxJob.nextRetryAt,
+            outboxJob.createdAt,
+            outboxJob.updatedAt,
+          ]
+        );
+      }
+
+      await client.query('COMMIT');
+      return { success: true };
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      if (err.code === '23505') {
+        return { success: false, isDuplicate: true };
+      }
+      return { success: false, error: err.message };
+    } finally {
+      client.release();
+    }
+  }
+
+  // =========================================================================
+  // DURABLE OUTBOX WORKER: ATOMIC CLAIM & LEASES (P0 Concurrency Protection)
+  // =========================================================================
+  public async claimPendingOutboxJobs(workerId: string, limit: number = 50, leaseSeconds: number = 60): Promise<OutboxJob[]> {
+    const now = new Date().toISOString();
+    const leaseTimeoutAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+
+    if (this.isPostgres && this.pgStore) {
+      const res = await this.pgStore.query(
+        `UPDATE outbox_jobs
+         SET status = 'processing',
+             claimed_at = NOW(),
+             lease_timeout_at = NOW() + ($1 || '60 seconds')::INTERVAL,
+             worker_id = $2,
+             updated_at = NOW()
+         WHERE id IN (
+           SELECT id FROM outbox_jobs
+           WHERE (status = 'pending' AND next_retry_at <= NOW())
+              OR (status = 'failed_retryable' AND next_retry_at <= NOW())
+              OR (status = 'processing' AND lease_timeout_at <= NOW())
+           ORDER BY created_at ASC
+           LIMIT $3
+           FOR UPDATE SKIP LOCKED
+         )
+         RETURNING *`,
+        [`${leaseSeconds} seconds`, workerId, limit]
+      );
+      return res.rows.map((r: any) => this.mapOutbox(r));
+    }
+
+    // SQLite Atomic Transaction Claim
+    const claimTx = this.db.transaction(() => {
+      const eligible = this.db.prepare(`
+        SELECT id FROM outbox_jobs
+        WHERE (status = 'pending' AND next_retry_at <= ?)
+           OR (status = 'failed_retryable' AND next_retry_at <= ?)
+           OR (status = 'processing' AND lease_timeout_at <= ?)
+        ORDER BY created_at ASC
+        LIMIT ?
+      `).all(now, now, now, limit) as Array<{ id: string }>;
+
+      if (eligible.length === 0) return [];
+
+      const ids = eligible.map(e => e.id);
+      const placeholders = ids.map(() => '?').join(',');
+      this.db.prepare(`
+        UPDATE outbox_jobs
+        SET status = 'processing',
+            claimed_at = ?,
+            lease_timeout_at = ?,
+            worker_id = ?,
+            updated_at = ?
+        WHERE id IN (${placeholders})
+      `).run(now, leaseTimeoutAt, workerId, now, ...ids);
+
+      const claimedRows = this.db.prepare(`
+        SELECT * FROM outbox_jobs WHERE id IN (${placeholders})
+      `).all(...ids) as any[];
+
+      return claimedRows.map(r => this.mapOutbox(r));
+    });
+
+    return claimTx();
   }
 
   // Workspaces
@@ -293,13 +582,92 @@ class RelationalDatabaseStore {
     `).run(w.id, w.name, w.slug, w.createdAt);
   }
 
-  // TikTok Destinations
-  public getDestinations(workspaceId?: string): TikTokDestination[] {
+  // Users & Sessions (P0 Multi-Tenant Authentication)
+  public saveUser(u: User): void {
+    this.db.prepare(`
+      INSERT INTO users (id, workspace_id, email, password_hash, role, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        password_hash = excluded.password_hash,
+        role = excluded.role
+    `).run(u.id, u.workspaceId, u.email, u.passwordHash, u.role, u.createdAt);
+  }
+
+  public getUserById(id: string): User | undefined {
     try {
-      const query = workspaceId
-        ? this.db.prepare('SELECT * FROM tiktok_destinations WHERE workspace_id = ? ORDER BY created_at DESC')
-        : this.db.prepare('SELECT * FROM tiktok_destinations ORDER BY created_at DESC');
-      const rows = (workspaceId ? query.all(workspaceId) : query.all()) as any[];
+      const r = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        workspaceId: r.workspace_id,
+        email: r.email,
+        passwordHash: r.password_hash,
+        role: r.role as any,
+        createdAt: r.created_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public getUserByEmail(email: string): User | undefined {
+    try {
+      const r = this.db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase().trim()) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        workspaceId: r.workspace_id,
+        email: r.email,
+        passwordHash: r.password_hash,
+        role: r.role as any,
+        createdAt: r.created_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public saveSession(s: Session): void {
+    this.db.prepare(`
+      INSERT INTO sessions (id, user_id, workspace_id, token, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        expires_at = excluded.expires_at
+    `).run(s.id, s.userId, s.workspaceId, s.token, s.expiresAt, s.createdAt);
+  }
+
+  public getSessionByToken(token: string): Session | undefined {
+    try {
+      const r = this.db.prepare('SELECT * FROM sessions WHERE token = ?').get(token) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        userId: r.user_id,
+        workspaceId: r.workspace_id,
+        token: r.token,
+        expiresAt: r.expires_at,
+        createdAt: r.created_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public deleteSession(token: string): void {
+    try {
+      this.db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    } catch {
+      // ignore
+    }
+  }
+
+  // TikTok Destinations (Strict Multi-Tenant Query Boundaries)
+  public getDestinations(workspaceId: string): TikTokDestination[] {
+    try {
+      const rows = this.db.prepare(
+        'SELECT * FROM tiktok_destinations WHERE workspace_id = ? ORDER BY created_at DESC'
+      ).all(workspaceId) as any[];
       return rows.map(r => ({
         id: r.id,
         workspaceId: r.workspace_id,
@@ -320,8 +688,8 @@ class RelationalDatabaseStore {
     try {
       const query = workspaceId
         ? this.db.prepare('SELECT * FROM tiktok_destinations WHERE id = ? AND workspace_id = ?')
-        : this.db.prepare('SELECT * FROM tiktok_destinations WHERE id = ? OR pixel_id = ?');
-      const r = (workspaceId ? query.get(id, workspaceId) : query.get(id, id)) as any;
+        : this.db.prepare('SELECT * FROM tiktok_destinations WHERE id = ?');
+      const r = (workspaceId ? query.get(id, workspaceId) : query.get(id)) as any;
       if (!r) return undefined;
       return {
         id: r.id,
@@ -363,12 +731,9 @@ class RelationalDatabaseStore {
     );
   }
 
-  public deleteDestination(id: string, workspaceId?: string): boolean {
+  public deleteDestination(id: string, workspaceId: string): boolean {
     try {
-      const stmt = workspaceId
-        ? this.db.prepare('DELETE FROM tiktok_destinations WHERE id = ? AND workspace_id = ?')
-        : this.db.prepare('DELETE FROM tiktok_destinations WHERE id = ?');
-      const info = workspaceId ? stmt.run(id, workspaceId) : stmt.run(id);
+      const info = this.db.prepare('DELETE FROM tiktok_destinations WHERE id = ? AND workspace_id = ?').run(id, workspaceId);
       return info.changes > 0;
     } catch {
       return false;
@@ -376,12 +741,11 @@ class RelationalDatabaseStore {
   }
 
   // Affiliate Integrations
-  public getIntegrations(workspaceId?: string): AffiliateIntegration[] {
+  public getIntegrations(workspaceId: string): AffiliateIntegration[] {
     try {
-      const query = workspaceId
-        ? this.db.prepare('SELECT * FROM affiliate_integrations WHERE workspace_id = ? ORDER BY created_at DESC')
-        : this.db.prepare('SELECT * FROM affiliate_integrations ORDER BY created_at DESC');
-      const rows = (workspaceId ? query.all(workspaceId) : query.all()) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM affiliate_integrations WHERE workspace_id = ? ORDER BY created_at DESC'
+      ).all(workspaceId) as any[];
       return rows.map(r => ({
         id: r.id,
         workspaceId: r.workspace_id,
@@ -400,9 +764,34 @@ class RelationalDatabaseStore {
     }
   }
 
+  public getIntegrationById(id: string, workspaceId?: string): AffiliateIntegration | undefined {
+    try {
+      const query = workspaceId
+        ? this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ? AND workspace_id = ?')
+        : this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ?');
+      const r = (workspaceId ? query.get(id, workspaceId) : query.get(id)) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        workspaceId: r.workspace_id,
+        network: r.network as NetworkType,
+        name: r.name,
+        secretToken: r.secret_token,
+        webhookSecretEncrypted: r.webhook_secret_encrypted || undefined,
+        destinationId: r.destination_id || undefined,
+        eventName: r.event_name || undefined,
+        valueStrategy: (r.value_strategy || 'commission') as any,
+        status: r.status,
+        createdAt: r.created_at,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   public getIntegrationByToken(network: NetworkType, token: string, workspaceId?: string): AffiliateIntegration | undefined {
     try {
-      let stmt = workspaceId
+      const stmt = workspaceId
         ? this.db.prepare('SELECT * FROM affiliate_integrations WHERE network = ? AND secret_token = ? AND workspace_id = ?')
         : this.db.prepare('SELECT * FROM affiliate_integrations WHERE network = ? AND secret_token = ?');
       const r = (workspaceId ? stmt.get(network, token, workspaceId) : stmt.get(network, token)) as any;
@@ -422,43 +811,6 @@ class RelationalDatabaseStore {
       };
     } catch {
       return undefined;
-    }
-  }
-
-  public getIntegrationById(id: string, workspaceId?: string): AffiliateIntegration | undefined {
-    try {
-      let stmt = workspaceId
-        ? this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ? AND workspace_id = ?')
-        : this.db.prepare('SELECT * FROM affiliate_integrations WHERE id = ?');
-      const r = (workspaceId ? stmt.get(id, workspaceId) : stmt.get(id)) as any;
-      if (!r) return undefined;
-      return {
-        id: r.id,
-        workspaceId: r.workspace_id,
-        network: r.network as NetworkType,
-        name: r.name,
-        secretToken: r.secret_token,
-        webhookSecretEncrypted: r.webhook_secret_encrypted || undefined,
-        destinationId: r.destination_id || undefined,
-        eventName: r.event_name || undefined,
-        valueStrategy: (r.value_strategy || 'commission') as any,
-        status: r.status,
-        createdAt: r.created_at,
-      };
-    } catch {
-      return undefined;
-    }
-  }
-
-  public deleteIntegration(id: string, workspaceId?: string): boolean {
-    try {
-      const stmt = workspaceId
-        ? this.db.prepare('DELETE FROM affiliate_integrations WHERE id = ? AND workspace_id = ?')
-        : this.db.prepare('DELETE FROM affiliate_integrations WHERE id = ?');
-      const info = workspaceId ? stmt.run(id, workspaceId) : stmt.run(id);
-      return info.changes > 0;
-    } catch {
-      return false;
     }
   }
 
@@ -490,7 +842,41 @@ class RelationalDatabaseStore {
     );
   }
 
-  // Raw Inbound Events
+  public deleteIntegration(id: string, workspaceId: string): boolean {
+    try {
+      const info = this.db.prepare('DELETE FROM affiliate_integrations WHERE id = ? AND workspace_id = ?').run(id, workspaceId);
+      return info.changes > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  // Idempotency Records
+  public checkIdempotency(idempotencyKey: string): { isDuplicate: boolean; conversionId?: string } {
+    try {
+      const r = this.db.prepare('SELECT conversion_id FROM idempotency_records WHERE idempotency_key = ?').get(idempotencyKey) as any;
+      if (r) {
+        return { isDuplicate: true, conversionId: r.conversion_id };
+      }
+      return { isDuplicate: false };
+    } catch {
+      return { isDuplicate: false };
+    }
+  }
+
+  public recordIdempotency(idempotencyKey: string, conversionId: string, network: string): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO idempotency_records (idempotency_key, conversion_id, network, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO NOTHING
+      `).run(idempotencyKey, conversionId, network, new Date().toISOString());
+    } catch (err) {
+      console.error('Failed to record idempotency:', err);
+    }
+  }
+
+  // Raw Inbound Events (Evidence First Persistence)
   public logRawInboundEvent(event: RawInboundEvent): void {
     try {
       this.db.prepare(`
@@ -520,12 +906,11 @@ class RelationalDatabaseStore {
     }
   }
 
-  public getRawEvents(workspaceId?: string, limit: number = 200): RawInboundEvent[] {
+  public getRawEvents(workspaceId: string, limit: number = 200): RawInboundEvent[] {
     try {
-      const query = workspaceId
-        ? this.db.prepare('SELECT * FROM raw_inbound_events WHERE workspace_id = ? ORDER BY received_at DESC LIMIT ?')
-        : this.db.prepare('SELECT * FROM raw_inbound_events ORDER BY received_at DESC LIMIT ?');
-      const rows = (workspaceId ? query.all(workspaceId, limit) : query.all(limit)) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM raw_inbound_events WHERE workspace_id = ? ORDER BY received_at DESC LIMIT ?'
+      ).all(workspaceId, limit) as any[];
       return rows.map(r => ({
         id: r.id,
         workspaceId: r.workspace_id,
@@ -570,89 +955,12 @@ class RelationalDatabaseStore {
     }
   }
 
-  // Idempotency DB Records
-  public checkIdempotency(idempotencyKey: string): { isDuplicate: boolean; conversionId?: string } {
+  // Canonical Conversions
+  public getConversions(workspaceId: string, limit: number = 500): CanonicalConversion[] {
     try {
-      const r = this.db.prepare('SELECT * FROM idempotency_records WHERE idempotency_key = ?').get(idempotencyKey) as any;
-      if (r) {
-        return { isDuplicate: true, conversionId: r.conversion_id };
-      }
-      return { isDuplicate: false };
-    } catch {
-      return { isDuplicate: false };
-    }
-  }
-
-  public recordIdempotency(key: string, conversionId: string, network: string): void {
-    try {
-      this.db.prepare(`
-        INSERT OR IGNORE INTO idempotency_records (idempotency_key, conversion_id, network, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(key, conversionId, network, new Date().toISOString());
-    } catch (err) {
-      console.error('Failed to record idempotency:', err);
-    }
-  }
-
-  // Canonical Conversions (DB Atomic)
-  public saveConversion(c: CanonicalConversion): { success: boolean; isDuplicate?: boolean } {
-    try {
-      this.db.prepare(`
-        INSERT INTO conversions (
-          id, workspace_id, raw_event_id, network, integration_id, destination_id,
-          transaction_id, parent_transaction_id, order_item_id, event_type,
-          tiktok_event_name, value_strategy, currency, commission_amount, gross_amount,
-          click_id, status, idempotency_key, error_message, received_at, processed_at
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?,
-          ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?
-        )
-        ON CONFLICT(id) DO UPDATE SET
-          status = excluded.status,
-          destination_id = excluded.destination_id,
-          tiktok_event_name = excluded.tiktok_event_name,
-          error_message = excluded.error_message,
-          processed_at = excluded.processed_at
-      `).run(
-        c.id,
-        c.workspaceId,
-        c.rawEventId,
-        c.network,
-        c.integrationId || c.networkAccountId || '',
-        c.destinationId || c.resolvedPixelId || null,
-        c.transactionId,
-        c.parentTransactionId || null,
-        c.orderItemId || null,
-        c.eventType,
-        c.tiktokEventName || c.targetEventName || 'CompletePayment',
-        c.valueStrategy || 'commission',
-        c.currency,
-        c.commissionAmount,
-        c.grossAmount || null,
-        c.clickId || null,
-        c.status,
-        c.idempotencyKey,
-        c.errorMessage || null,
-        c.receivedAt,
-        c.processedAt || null
-      );
-      return { success: true };
-    } catch (err: any) {
-      if (err.message?.includes('UNIQUE constraint failed: conversions.idempotency_key')) {
-        return { success: false, isDuplicate: true };
-      }
-      throw err;
-    }
-  }
-
-  public getConversions(workspaceId?: string, limit: number = 500): CanonicalConversion[] {
-    try {
-      const query = workspaceId
-        ? this.db.prepare('SELECT * FROM conversions WHERE workspace_id = ? ORDER BY received_at DESC LIMIT ?')
-        : this.db.prepare('SELECT * FROM conversions ORDER BY received_at DESC LIMIT ?');
-      const rows = (workspaceId ? query.all(workspaceId, limit) : query.all(limit)) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM conversions WHERE workspace_id = ? ORDER BY received_at DESC LIMIT ?'
+      ).all(workspaceId, limit) as any[];
       return rows.map(r => this.mapConversion(r));
     } catch {
       return [];
@@ -666,6 +974,60 @@ class RelationalDatabaseStore {
       return this.mapConversion(r);
     } catch {
       return undefined;
+    }
+  }
+
+  public saveConversion(conversion: CanonicalConversion): void {
+    try {
+      this.db.prepare(`
+        INSERT INTO conversions (
+          id, workspace_id, raw_event_id, network, integration_id, destination_id,
+          transaction_id, parent_transaction_id, order_item_id, event_type,
+          tiktok_event_name, value_strategy, currency, commission_amount, gross_amount,
+          click_id, status, idempotency_key, error_message, received_at, processed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          destination_id = excluded.destination_id,
+          status = excluded.status,
+          error_message = excluded.error_message,
+          processed_at = excluded.processed_at
+      `).run(
+        conversion.id,
+        conversion.workspaceId,
+        conversion.rawEventId,
+        conversion.network,
+        conversion.integrationId,
+        conversion.destinationId || null,
+        conversion.transactionId,
+        conversion.parentTransactionId || null,
+        conversion.orderItemId || null,
+        conversion.eventType,
+        conversion.tiktokEventName,
+        conversion.valueStrategy,
+        conversion.currency || null,
+        conversion.commissionAmount !== null && conversion.commissionAmount !== undefined ? conversion.commissionAmount : null,
+        conversion.grossAmount !== null && conversion.grossAmount !== undefined ? conversion.grossAmount : null,
+        conversion.clickId || null,
+        conversion.status,
+        conversion.idempotencyKey,
+        conversion.errorMessage || null,
+        conversion.receivedAt,
+        conversion.processedAt || null
+      );
+    } catch (err) {
+      console.error('Failed to save conversion:', err);
+    }
+  }
+
+  public updateConversionStatus(id: string, status: string, processedAt?: string, errorMessage?: string): void {
+    try {
+      this.db.prepare(`
+        UPDATE conversions
+        SET status = ?, processed_at = ?, error_message = ?
+        WHERE id = ?
+      `).run(status, processedAt || null, errorMessage || null, id);
+    } catch (err) {
+      console.error('Failed to update conversion status:', err);
     }
   }
 
@@ -683,9 +1045,9 @@ class RelationalDatabaseStore {
       eventType: r.event_type as any,
       tiktokEventName: r.tiktok_event_name,
       valueStrategy: r.value_strategy as any,
-      currency: r.currency,
-      commissionAmount: r.commission_amount,
-      grossAmount: r.gross_amount !== null ? r.gross_amount : undefined,
+      currency: r.currency || null,
+      commissionAmount: r.commission_amount !== null && r.commission_amount !== undefined ? Number(r.commission_amount) : null,
+      grossAmount: r.gross_amount !== null && r.gross_amount !== undefined ? Number(r.gross_amount) : null,
       clickId: r.click_id || undefined,
       status: r.status as any,
       idempotencyKey: r.idempotency_key,
@@ -698,18 +1060,21 @@ class RelationalDatabaseStore {
     };
   }
 
-  // Outbox Jobs (Durable Queue)
+  // Outbox Jobs
   public saveOutboxJob(j: OutboxJob): void {
     try {
       this.db.prepare(`
         INSERT INTO outbox_jobs (
           id, workspace_id, conversion_id, destination_id, tiktok_event_name,
-          payload, status, attempts, max_attempts, next_retry_at, last_error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          payload, status, attempts, max_attempts, next_retry_at, claimed_at, lease_timeout_at, worker_id, last_error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           status = excluded.status,
           attempts = excluded.attempts,
           next_retry_at = excluded.next_retry_at,
+          claimed_at = excluded.claimed_at,
+          lease_timeout_at = excluded.lease_timeout_at,
+          worker_id = excluded.worker_id,
           last_error = excluded.last_error,
           updated_at = excluded.updated_at
       `).run(
@@ -723,6 +1088,9 @@ class RelationalDatabaseStore {
         j.attempts,
         j.maxAttempts,
         j.nextRetryAt,
+        j.claimedAt || null,
+        j.leaseTimeoutAt || null,
+        j.workerId || null,
         j.lastError || null,
         j.createdAt,
         j.updatedAt
@@ -744,22 +1112,6 @@ class RelationalDatabaseStore {
     }
   }
 
-  public getPendingOutboxJobs(limit: number = 50): OutboxJob[] {
-    try {
-      const now = new Date().toISOString();
-      const rows = this.db.prepare(`
-        SELECT * FROM outbox_jobs
-        WHERE status IN ('pending', 'failed_retryable')
-        AND next_retry_at <= ?
-        ORDER BY next_retry_at ASC
-        LIMIT ?
-      `).all(now, limit) as any[];
-      return rows.map(r => this.mapOutbox(r));
-    } catch {
-      return [];
-    }
-  }
-
   private mapOutbox(r: any): OutboxJob {
     return {
       id: r.id,
@@ -767,11 +1119,14 @@ class RelationalDatabaseStore {
       conversionId: r.conversion_id,
       destinationId: r.destination_id,
       tiktokEventName: r.tiktok_event_name,
-      payload: JSON.parse(r.payload || '{}'),
+      payload: typeof r.payload === 'string' ? JSON.parse(r.payload || '{}') : r.payload,
       status: r.status as any,
       attempts: r.attempts,
       maxAttempts: r.max_attempts,
       nextRetryAt: r.next_retry_at,
+      claimedAt: r.claimed_at || undefined,
+      leaseTimeoutAt: r.lease_timeout_at || undefined,
+      workerId: r.worker_id || undefined,
       lastError: r.last_error || undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
@@ -810,9 +1165,9 @@ class RelationalDatabaseStore {
 
   public getDeliveryAttemptsForConversion(conversionId: string): DeliveryAttempt[] {
     try {
-      const rows = this.db.prepare(`
-        SELECT * FROM delivery_attempts WHERE conversion_id = ? ORDER BY attempted_at DESC
-      `).all(conversionId) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM delivery_attempts WHERE conversion_id = ? ORDER BY attempted_at DESC'
+      ).all(conversionId) as any[];
       return rows.map(r => ({
         id: r.id,
         outboxJobId: r.outbox_job_id,
@@ -836,9 +1191,9 @@ class RelationalDatabaseStore {
 
   public getDeliveryAttempts(limit: number = 50): DeliveryAttempt[] {
     try {
-      const rows = this.db.prepare(`
-        SELECT * FROM delivery_attempts ORDER BY attempted_at DESC LIMIT ?
-      `).all(limit) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM delivery_attempts ORDER BY attempted_at DESC LIMIT ?'
+      ).all(limit) as any[];
       return rows.map(r => ({
         id: r.id,
         outboxJobId: r.outbox_job_id,
@@ -860,39 +1215,12 @@ class RelationalDatabaseStore {
     }
   }
 
-  public clearData(): void {
-    try {
-      this.db.exec(`
-        DELETE FROM conversions;
-        DELETE FROM raw_inbound_events;
-        DELETE FROM outbox_jobs;
-        DELETE FROM delivery_attempts;
-        DELETE FROM idempotency_records;
-        DELETE FROM tiktok_destinations;
-        UPDATE integration_health SET
-          total_postbacks_received = 0,
-          total_conversions_processed = 0,
-          missing_click_id_count = 0,
-          duplicate_count = 0,
-          failed_deliveries_count = 0,
-          attribution_rate = 100,
-          delivery_rate = 100,
-          last_postback_at = NULL,
-          last_conversion_at = NULL,
-          last_tiktok_delivery_at = NULL;
-      `);
-    } catch (err) {
-      console.error('Failed to clear data:', err);
-    }
-  }
-
   // Integration Health
-  public getIntegrationHealth(workspaceId?: string): IntegrationHealth[] {
+  public getIntegrationHealth(workspaceId: string): IntegrationHealth[] {
     try {
-      const query = workspaceId
-        ? this.db.prepare('SELECT * FROM integration_health WHERE workspace_id = ?')
-        : this.db.prepare('SELECT * FROM integration_health');
-      const rows = (workspaceId ? query.all(workspaceId) : query.all()) as any[];
+      const rows = this.db.prepare(
+        'SELECT * FROM integration_health WHERE workspace_id = ?'
+      ).all(workspaceId) as any[];
       return rows.map(r => ({
         id: r.id,
         workspaceId: r.workspace_id,
@@ -907,8 +1235,8 @@ class RelationalDatabaseStore {
         missingClickIdCount: r.missing_click_id_count,
         duplicateCount: r.duplicate_count,
         failedDeliveriesCount: r.failed_deliveries_count,
-        attributionRate: r.attribution_rate,
-        deliveryRate: r.delivery_rate,
+        attributionRate: Number(r.attribution_rate),
+        deliveryRate: Number(r.delivery_rate),
         updatedAt: r.updated_at,
         networkAccountId: r.integration_id,
       }));
@@ -962,8 +1290,28 @@ class RelationalDatabaseStore {
     }
   }
 
-  // Compatibility Wrappers
-  public getPixels(workspaceId?: string): TikTokDestination[] {
+  public clearData(): void {
+    try {
+      this.db.exec(`
+        DELETE FROM delivery_attempts;
+        DELETE FROM outbox_jobs;
+        DELETE FROM conversions;
+        DELETE FROM idempotency_records;
+        DELETE FROM raw_inbound_events;
+        DELETE FROM integration_health;
+        DELETE FROM affiliate_integrations;
+        DELETE FROM tiktok_destinations;
+        DELETE FROM sessions;
+        DELETE FROM users;
+        DELETE FROM workspaces;
+      `);
+    } catch (err) {
+      console.error('Failed to clear data:', err);
+    }
+  }
+
+  // Compatibility wrappers
+  public getPixels(workspaceId: string): TikTokDestination[] {
     return this.getDestinations(workspaceId);
   }
 
@@ -975,36 +1323,16 @@ class RelationalDatabaseStore {
     this.saveDestination(p);
   }
 
-  public getNetworkAccounts(workspaceId?: string): AffiliateIntegration[] {
+  public getNetworkAccounts(workspaceId: string): AffiliateIntegration[] {
     return this.getIntegrations(workspaceId);
-  }
-
-  public getNetworkAccountByToken(network: NetworkType, workspaceId: string, token: string): AffiliateIntegration | undefined {
-    return this.getIntegrationByToken(network, token, workspaceId);
   }
 
   public saveNetworkAccount(n: AffiliateIntegration): void {
     this.saveIntegration(n);
   }
 
-  public saveOutboxTask(t: OutboxJob): void {
-    this.saveOutboxJob(t);
-  }
-
   public getOutboxTasks(): OutboxJob[] {
     return this.getOutboxJobs();
-  }
-
-  public getAdAccounts(_workspaceId?: string): any[] {
-    return [];
-  }
-
-  public getOffers(_workspaceId?: string): any[] {
-    return [];
-  }
-
-  public getTrackingLinks(_workspaceId?: string): any[] {
-    return [];
   }
 }
 

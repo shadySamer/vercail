@@ -41,9 +41,9 @@ class NetworkRegistry {
         chargebackEvent: 'VERIFIED',
         commissionPayout: 'VERIFIED',
         grossRevenue: 'VERIFIED',
-        signedSecurity: 'VERIFIED',
+        signedSecurity: 'UNSUPPORTED', // Relies on cryptographically random secret endpoint token
         testSimulation: 'VERIFIED',
-        notes: 'SubID (1-5) parameters supported. Postback macros: {SUBID}, {ORDERID}, {COMMISSION_AMOUNT}, {PRODUCT_CODENAME}. Echoes OK.',
+        notes: 'SubID (1-5) parameters supported. Postback tokens: {SUBID}, {ORDERID}, {COMMISSION_AMOUNT}, {PRODUCT_CODENAME}. Authenticated via secret endpoint URL token.',
       },
       {
         network: 'buygoods',
@@ -57,9 +57,9 @@ class NetworkRegistry {
         chargebackEvent: 'VERIFIED',
         commissionPayout: 'VERIFIED',
         grossRevenue: 'VERIFIED',
-        signedSecurity: 'VERIFIED',
+        signedSecurity: 'UNSUPPORTED', // Relies on cryptographically random secret endpoint token
         testSimulation: 'VERIFIED',
-        notes: 'Dedicated subid tokens {SUBID}, {ORDERID}, {COMMISSION_AMOUNT}, {PRODUCT_CODENAME}. Echoes OK.',
+        notes: 'Dedicated subid tokens {SUBID}, {ORDERID}, {COMMISSION_AMOUNT}, {PRODUCT_CODENAME}. Authenticated via secret endpoint URL token.',
       },
       {
         network: 'digistore24',
@@ -73,9 +73,9 @@ class NetworkRegistry {
         chargebackEvent: 'VERIFIED',
         commissionPayout: 'VERIFIED',
         grossRevenue: 'VERIFIED',
-        signedSecurity: 'VERIFIED',
+        signedSecurity: 'VERIFIED', // Generic IPN supports SHA-512 passphrase verification
         testSimulation: 'VERIFIED',
-        notes: 'Uses cid for TikTok Click ID and custom for labels. Generic IPN supports SHA-512 passphrase verification.',
+        notes: 'Uses cid for TikTok Click ID and custom for labels. Generic IPN supports SHA-512 passphrase signature verification.',
       },
       {
         network: 'clickbank',
@@ -89,9 +89,9 @@ class NetworkRegistry {
         chargebackEvent: 'VERIFIED',
         commissionPayout: 'VERIFIED',
         grossRevenue: 'VERIFIED',
-        signedSecurity: 'VERIFIED',
+        signedSecurity: 'VERIFIED', // Encrypted INS 6.0/7.0 AES-256-CBC
         testSimulation: 'VERIFIED',
-        notes: 'Supports modern extclid, aff_sub1-5, campaign, adgroup parameters and encrypted INS 6.0/7.0 AES-256-CBC payloads.',
+        notes: 'Supports extclid and aff_sub1-5 parameters and encrypted INS 6.0/7.0 AES-256-CBC notifications.',
       },
     ];
   }

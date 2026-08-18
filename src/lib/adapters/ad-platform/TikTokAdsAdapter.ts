@@ -31,8 +31,8 @@ export class TikTokAdsAdapter implements AdPlatformAdapter {
   ): Promise<DispatchResult> {
     const startTime = Date.now();
 
-    // Deduplication Key: Use order item ID (for upsells) or top-level transaction ID
-    const eventId = conversion.orderItemId || conversion.transactionId;
+    // Deduplication Key: Use deterministic conversion.id to ensure stable event_id across all retries
+    const eventId = conversion.id;
 
     // Unix timestamp in seconds
     const eventTime = Math.floor(new Date(conversion.receivedAt || Date.now()).getTime() / 1000);
@@ -45,38 +45,27 @@ export class TikTokAdsAdapter implements AdPlatformAdapter {
     if (conversion.clickId) {
       userPayload.ttclid = conversion.clickId;
     }
-    if (conversion.customerIp) {
-      userPayload.ip = conversion.customerIp;
-    }
-    if (conversion.customerUserAgent) {
-      userPayload.user_agent = conversion.customerUserAgent;
-    }
 
-    // Determine event value strictly based on selected Value Strategy (NO IMPLICIT FALLBACK)
+    // Determine event value strictly based on selected Value Strategy (NO IMPLICIT FALLBACK, NO FAKE DEFAULTS)
     const properties: Record<string, any> = {};
     const strategy = conversion.valueStrategy || 'commission';
 
     if (strategy === 'commission') {
-      properties.value = Number(conversion.commissionAmount.toFixed(2));
-      properties.currency = conversion.currency || 'USD';
+      if (conversion.commissionAmount !== null && conversion.commissionAmount !== undefined) {
+        properties.value = Number(conversion.commissionAmount.toFixed(2));
+        if (conversion.currency) {
+          properties.currency = conversion.currency;
+        }
+      }
     } else if (strategy === 'gross') {
       if (conversion.grossAmount !== undefined && conversion.grossAmount !== null) {
         properties.value = Number(conversion.grossAmount.toFixed(2));
-        properties.currency = conversion.currency || 'USD';
+        if (conversion.currency) {
+          properties.currency = conversion.currency;
+        }
       }
     }
-    // If strategy === 'none', omit value
-
-    if (conversion.productName || conversion.offerName) {
-      properties.contents = [
-        {
-          content_id: conversion.productName || conversion.offerName || 'AFFILIATE-OFFER',
-          content_type: 'product',
-          quantity: 1,
-          price: properties.value !== undefined ? properties.value : 0,
-        },
-      ];
-    }
+    // If strategy === 'none', omit value completely
 
     // Standardized TikTok Events API v1.3 payload
     const payload: Record<string, any> = {
@@ -99,7 +88,7 @@ export class TikTokAdsAdapter implements AdPlatformAdapter {
       payload.test_event_code = testCode;
     }
 
-    // In simulation test mode
+    // In explicit simulation test mode
     if (options.isSimulation) {
       const latencyMs = Math.max(15, Date.now() - startTime + Math.floor(Math.random() * 50 + 25));
       return {
@@ -139,35 +128,28 @@ export class TikTokAdsAdapter implements AdPlatformAdapter {
 
       clearTimeout(timeoutId);
       const latencyMs = Date.now() - startTime;
+      const responseBody = await response.json().catch(() => ({}));
 
-      let responseBody: any = {};
-      try {
-        responseBody = await response.json();
-      } catch {
-        responseBody = { rawText: await response.text() };
-      }
-
-      const isSuccess = response.ok && (responseBody.code === 0 || responseBody.code === 'OK');
-      const classification = isSuccess ? undefined : this.classifyError(response.status, responseBody);
+      const isSuccess = response.ok && (responseBody?.code === 0 || responseBody?.code === 20000);
+      const errorClassification = isSuccess ? undefined : this.classifyError(response.status, responseBody);
 
       return {
         isSuccess,
         statusCode: response.status,
         responseBody,
         latencyMs,
-        errorClassification: classification,
-        errorMessage: isSuccess ? undefined : responseBody.message || `HTTP ${response.status}`,
+        errorClassification,
+        errorMessage: isSuccess ? undefined : (responseBody?.message || `HTTP ${response.status} Error`),
       };
     } catch (err: any) {
       const latencyMs = Date.now() - startTime;
-      const isTimeout = err.name === 'AbortError' || err.message?.includes('timeout');
       return {
         isSuccess: false,
-        statusCode: isTimeout ? 408 : 500,
-        responseBody: { error: err.message, isTimeout },
+        statusCode: 0,
+        responseBody: { error: err.message },
         latencyMs,
         errorClassification: 'RETRYABLE',
-        errorMessage: `Network transport failure: ${err.message}`,
+        errorMessage: err.name === 'AbortError' ? 'TikTok Events API Request Timeout (10s)' : err.message,
       };
     }
   }
